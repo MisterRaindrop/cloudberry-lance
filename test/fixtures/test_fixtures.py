@@ -300,14 +300,22 @@ def test_generator_can_build_the_big_dataset(tmp_path):
     assert len(set(ds.to_table().column("payload").to_pylist())) == 12
 
 
-def test_generator_regenerates_a_subset_without_dropping_the_others(tmp_path):
-    gen.generate(str(tmp_path), names=["frag_1", "frag_2"])
-    first = json.load(open(os.path.join(str(tmp_path), "manifest.json")))
-    assert list(first["datasets"]) == ["frag_1", "frag_2"]
-    gen.generate(str(tmp_path), names=["frag_3"])
-    second = json.load(open(os.path.join(str(tmp_path), "manifest.json")))
-    assert list(second["datasets"]) == ["frag_1", "frag_2", "frag_3"]
-    assert second["datasets"]["frag_1"] == first["datasets"]["frag_1"]
+def test_generator_regenerates_a_subset_without_disturbing_the_others(tmp_path):
+    root = str(tmp_path)
+    path = os.path.join(root, "manifest.json")
+    gen.generate(root, names=["frag_1", "frag_2"])
+    assert list(json.load(open(path))["datasets"]) == ["frag_1", "frag_2"]
+    with open(path, "rb") as fh:
+        before = fh.read()
+
+    # Rewriting frag_1 must leave the carried-over frag_2 entry byte for byte
+    # alone, formatting included, or subset regenerations produce noisy diffs.
+    gen.generate(root, names=["frag_1"])
+    with open(path, "rb") as fh:
+        assert fh.read() == before
+
+    gen.generate(root, names=["frag_3"])
+    assert list(json.load(open(path))["datasets"]) == ["frag_1", "frag_2", "frag_3"]
 
 
 def test_classify_follows_the_design_type_table():

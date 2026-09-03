@@ -600,6 +600,26 @@ class Compact:
         self.value = value
 
 
+#: Dataset-entry fields that describe returns wrapped in Compact.  Entries read
+#: back from an existing manifest have to be re-wrapped, or regenerating one
+#: dataset would reformat all the others.
+COMPACT_FIELDS = ("fragment_ids", "fragment_rows", "fragment_physical_rows",
+                  "fragments_with_deletion_file", "data_files_per_fragment",
+                  "file_format_versions")
+COMPACT_LIST_FIELDS = ("history", "schema")
+
+
+def recompact(entry: dict) -> dict:
+    """Restore the one-line formatting of an entry loaded from manifest.json."""
+    out = dict(entry)
+    for key in COMPACT_FIELDS:
+        if key in out and not isinstance(out[key], Compact):
+            out[key] = Compact(out[key])
+    for key in COMPACT_LIST_FIELDS:
+        out[key] = [v if isinstance(v, Compact) else Compact(v) for v in out.get(key, [])]
+    return out
+
+
 def dumps_manifest(obj) -> str:
     marks: dict[str, str] = {}
 
@@ -739,7 +759,8 @@ def generate(root: str, names: Optional[Iterable[str]] = None, with_big: bool = 
     }
     if os.path.exists(manifest_path) and names is not None:
         with open(manifest_path) as fh:
-            manifest["datasets"] = json.load(fh)["datasets"]
+            kept = json.load(fh)["datasets"]
+        manifest["datasets"] = {n: recompact(e) for n, e in kept.items()}
 
     for name, builder in builders.items():
         built = builder()

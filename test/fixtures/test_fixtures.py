@@ -318,6 +318,29 @@ def test_generator_regenerates_a_subset_without_disturbing_the_others(tmp_path):
     assert list(json.load(open(path))["datasets"]) == ["frag_1", "frag_2", "frag_3"]
 
 
+def test_command_line_writes_where_it_is_told(tmp_path, capsys):
+    root = str(tmp_path)
+    assert gen.main(["--root", root, "--datasets", "frag_2,empty"]) == 0
+    assert "frag_2" in capsys.readouterr().out
+    # written in the frozen order, whatever order they were asked for in
+    assert list(json.load(open(os.path.join(root, "manifest.json")))["datasets"]) == \
+        ["empty", "frag_2"]
+    assert os.path.isdir(os.path.join(root, "data", "frag_2.lance"))
+    with pytest.raises(SystemExit):
+        gen.main(["--root", root, "--datasets", "no_such_dataset"])
+
+
+def test_command_line_can_pin_the_lance_file_format(tmp_path):
+    """DESIGN Q4 fallback: regenerate as 2.0 if lance-c cannot read 2.1."""
+    root = str(tmp_path)
+    gen.main(["--root", root, "--datasets", "frag_1",
+              "--data-storage-version", "2.0", "--quiet"])
+    m = json.load(open(os.path.join(root, "manifest.json")))
+    assert m["generated_by"]["data_storage_version_requested"] == "2.0"
+    assert m["datasets"]["frag_1"]["data_storage_version"] == "2.0"
+    assert m["datasets"]["frag_1"]["file_format_versions"] == ["2.0"]
+
+
 def test_classify_follows_the_design_type_table():
     assert gen.classify(pa.int32()) == ("A", "integer")
     assert gen.classify(pa.uint32()) == ("A", "bigint")

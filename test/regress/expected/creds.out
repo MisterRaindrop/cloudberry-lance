@@ -16,9 +16,9 @@ BEGIN
                  current_setting('regress.s3_region'), 'true');
 END
 $$;
-CREATE USER MAPPING FOR PUBLIC SERVER creds_srv
-  OPTIONS (aws_access_key_id 'LANCE_CANARY_KEY_9f3a',
-           aws_secret_access_key 'LANCE_CANARY_SECRET_9f3a');
+-- Deliberately on one line: the server logs DDL verbatim, and the gate's grep
+-- forgives a log line only when the words CREATE USER MAPPING are on it.
+CREATE USER MAPPING FOR PUBLIC SERVER creds_srv OPTIONS (aws_access_key_id 'LANCE_CANARY_KEY_9f3a', aws_secret_access_key 'LANCE_CANARY_SECRET_9f3a');
 CREATE FOREIGN TABLE lance_regress.creds_t (id integer, v text, n bigint)
   SERVER creds_srv OPTIONS (uri 'frag_3.lance');
 -- The needles are spelled as two halves so that these statements do not

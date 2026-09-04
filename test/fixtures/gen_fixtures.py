@@ -435,6 +435,27 @@ def build_empty() -> Built:
                  notes=["pylance writes no fragment at all for an empty table"])
 
 
+def build_empty_b() -> Built:
+    """Zero rows and a schema the wrapper cannot read.
+
+    The empty-dataset projection check has to work off the schema, so proving
+    it covers the tier decision needs a dataset with no rows at all *and* a
+    B-tier column: with rows, the refusal could come from the stream converter
+    instead and the test would prove nothing about the new path.
+    """
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("c_uint64", pa.uint64()),
+    ])
+    return Built(
+        purpose="Zero rows with a B-tier column: an empty dataset whose "
+                "projection still has to be refused.",
+        table=pa.table({"id": pa.array([], pa.int32()),
+                        "c_uint64": pa.array([], pa.uint64())}, schema=schema),
+        notes=["pylance writes no fragment at all for an empty table, so this "
+               "dataset has a schema and nothing else"])
+
+
 def build_frag(n_fragments: int, rows_per_fragment: int) -> Callable[[], Built]:
     def build() -> Built:
         return Built(
@@ -605,6 +626,7 @@ BUILDERS: dict[str, Callable[[], Built]] = {
     "types_b": build_types_b,
     "deleted": build_deleted,
     "empty": build_empty,
+    "empty_b": build_empty_b,
     "frag_1": build_frag(1, 5),
     "frag_2": build_frag(2, 5),
     "frag_3": build_frag(3, 5),

@@ -181,11 +181,26 @@ SELECT lance_regress.message($$SELECT id FROM lance_regress.errs_empty_coord$$) 
 empty_bad_type_coordinator
 lance_fdw: column "id": Lance type "i" (int32) cannot be read as text
 (1 row)
+-- A B-tier column on a dataset with no fragments at all: types_b.lance has
+-- rows, so its refusal comes from the stream converter and would still happen
+-- with the schema check gone.  empty_b.lance is zero rows and zero fragments,
+-- so only the dataset schema can refuse it (I8).
 CREATE FOREIGN TABLE lance_regress.errs_empty_btier (id integer, c_uint64 bigint)
-  SERVER errs_files OPTIONS (uri 'types_b.lance', mpp_execute 'coordinator');
-SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier$$) AS btier_coordinator;
-btier_coordinator
+  SERVER errs_files OPTIONS (uri 'empty_b.lance');
+SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier$$) AS empty_btier;
+empty_btier
 lance_fdw: column "c_uint64": Lance type "L" (uint64) is not supported and cannot be read as bigint
+(1 row)
+CREATE FOREIGN TABLE lance_regress.errs_empty_btier_coord (id integer, c_uint64 bigint)
+  SERVER errs_files OPTIONS (uri 'empty_b.lance', mpp_execute 'coordinator');
+SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier_coord$$) AS empty_btier_coordinator;
+empty_btier_coordinator
+lance_fdw: column "c_uint64": Lance type "L" (uint64) is not supported and cannot be read as bigint
+(1 row)
+-- The A-tier column of the same empty dataset still reads its zero rows.
+SELECT count(*) AS rows, count(id) AS non_null_id FROM lance_regress.errs_empty_btier;
+rows|non_null_id
+0|0
 (1 row)
 -- A declaration that does match reads its zero rows, and count(*) asks for no
 -- column at all, so it never had a projection to check.

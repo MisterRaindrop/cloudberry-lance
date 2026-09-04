@@ -118,12 +118,17 @@ A Lance dataset is a set of *fragments*, and a fragment is the unit of
 parallelism. Under the default `mpp_execute 'all segments'`:
 
 - the coordinator opens the dataset once, pins the version it finds, lists the
-  fragment ids and puts uri, version and ids into the plan it dispatches. It
-  reads no data itself;
+  fragment ids and puts uri, version, ids and the planned segment count into
+  the plan it dispatches. It reads no data itself;
 - every segment takes its own share of that list — fragment `i` belongs to
   segment `(i + session_id % N + command_count) % N` — and opens the dataset at
   the version the coordinator pinned. The shares are disjoint and together
   complete, and no segment has to talk to any other to know that;
+- `N` is that planned segment count, not the size of the cluster: a foreign
+  table or its server may set `num_segments`, and Cloudberry then runs the scan
+  on that many segments only, so the split has to use the same number. A
+  `num_segments` larger than the cluster is refused, because such a gang
+  repeats a segment and the two copies cannot tell themselves apart;
 - a segment whose share is empty opens nothing at all, which is what a dataset
   with fewer fragments than segments costs.
 
@@ -177,8 +182,12 @@ and works even against a server whose credentials are wrong.
 | `aws_secret_access_key` | The secret half of that key pair. |
 | `aws_session_token` | For temporary credentials. |
 
-Credentials are read from the user mapping in whichever process needs them and
-are never put into a plan, an `EXPLAIN`, or a log line.
+Credentials are read from the user mapping in whichever process needs them.
+`lance_fdw` never puts them into a plan, an `EXPLAIN`, its own log lines or its
+error messages. The one place they do appear is the `CREATE USER MAPPING`
+statement itself, which PostgreSQL echoes into the server log like any other
+DDL when `log_statement` is `ddl` or `all`. No wrapper can prevent that, and
+the gate's credential check allows exactly that one line and nothing else.
 
 **Foreign table**
 
@@ -189,6 +198,7 @@ are never put into a plan, an `EXPLAIN`, or a log line.
 | `batch_size` | Rows per Arrow batch. Unset means lance-c decides, which is 8192 rows unless its own `LANCE_DEFAULT_BATCH_SIZE` says otherwise. Lower it for datasets with large binary columns. |
 | `rows_hint` | Row estimate for the planner. Default 100000. Planning does no I/O, so this is the only way the planner can know better. |
 | `mpp_execute` | Overrides the server's setting. |
+| `num_segments` | Read by Cloudberry rather than by this wrapper: it narrows how many segments run the scan, and the fragment split follows it. A value above the number of segments in the cluster is refused, because such a gang repeats a segment and the two copies cannot be told apart. |
 
 **Column**
 
@@ -325,14 +335,14 @@ The suites, in the order they run:
 | `parallel` | the split is complete and disjoint for 1, 2, 3, 7 and 100 fragments; `coordinator` and `any` agree with `all segments` |
 | `snapshot` | version pinning, in both the rows and the fragment count, including a version whose successor deleted rows from existing fragments — the case an append-only history cannot tell apart on the segments |
 | `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
-| `creds` | the user mapping secret is in no plan; the gate then greps the server logs for it |
+| `creds` | none of the three user mapping credentials is in a plan; the gate then greps the server logs for all three |
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
 | `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
 | `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
 | `sigmask` | I5, read back from `/proc`: after a scan in this backend every lance-c thread blocks the signals a backend is driven by, and the main thread does not |
 
-After the suites, the gate greps the coordinator and segment logs for the fake
-secret the `creds` suite puts in a user mapping. The only line allowed to
+After the suites, the gate greps the coordinator and segment logs for the three
+fake credentials the `creds` suite puts in a user mapping. The only line allowed to
 contain it is the `CREATE USER MAPPING` statement itself, which the server logs
 verbatim like any other DDL.
 

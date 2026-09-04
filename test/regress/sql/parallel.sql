@@ -102,3 +102,13 @@ SELECT count(*) AS narrow_only FROM (
   SELECT * FROM lance_regress.par_3_two EXCEPT SELECT * FROM lance_regress.par_3) d;
 SELECT count(*) AS wide_only FROM (
   SELECT * FROM lance_regress.par_3 EXCEPT SELECT * FROM lance_regress.par_3_two) d;
+-- A width wider than the cluster is refused: Cloudberry would build that gang
+-- by repeating a content, two QEs would carry the same segment index and read
+-- the same fragments, and the planned indexes above the cluster size would have
+-- no process at all.  The test cluster has three segments.
+CREATE FOREIGN TABLE lance_regress.par_3_wide (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_3.lance', num_segments '4');
+SELECT lance_regress.message($$SELECT count(*) FROM lance_regress.par_3_wide$$) AS wider_than_the_cluster;
+-- The narrow widths above still work, and so does the default.
+SELECT count(*) AS rows FROM lance_regress.par_3_two;
+SELECT count(*) AS rows FROM lance_regress.par_3;

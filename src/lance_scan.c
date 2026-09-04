@@ -460,6 +460,28 @@ lance_scan_begin_internal(ForeignScanState *node, LanceScanState *state,
 		int			nsegments = table->num_segments > 0 ? table->num_segments
 			: getgpsegmentCount();
 
+		/*
+		 * A width wider than the cluster cannot be divided.  Cloudberry builds
+		 * such a gang by repeating contents - `i % getgpsegmentCount()` in
+		 * execUtils.c - so two QEs would carry the same GpIdentity.segindex,
+		 * take the same share and read those fragments twice, while the
+		 * planned indexes at or above the cluster size would have no process
+		 * at all.  Measured on the three-segment cluster with num_segments
+		 * '4': both QEs on content 0 logged the same fragment, and count(*)
+		 * over a 15-row dataset came back as 20, 15 or 10 depending on the
+		 * rotation.  Nothing lets a QE tell itself apart from its twin, so
+		 * this is refused rather than guessed at (I2).
+		 */
+		if (nsegments > getgpsegmentCount())
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("lance_fdw: foreign table \"%s\" is planned for %d segments, but the cluster has %d",
+							RelationGetRelationName(rel), nsegments,
+							getgpsegmentCount()),
+					 errdetail("Fragments are divided among the segments that run the scan, and a width wider than the cluster repeats a segment."),
+					 errhint("Set num_segments to at most %d, or leave it unset.",
+							 getgpsegmentCount())));
+
 		lance_scan_open_dataset(state, state->opts.version);
 		lance_scan_validate_projection(state, rel);
 		lance_scan_list_fragments(state);

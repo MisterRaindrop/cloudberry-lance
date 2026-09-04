@@ -171,6 +171,33 @@
         {"name": "n", "arrow_type": "int64", "arrow_format": "l", "nullable": true, "tier": "A", "pg_type": "bigint", "metadata": null, "expected_encoding": "int"}
       ]
     },
+    "empty_b": {
+      "name": "empty_b",
+      "purpose": "Zero rows with a B-tier column: an empty dataset whose projection still has to be refused.",
+      "path": "data/empty_b.lance",
+      "version": 1,
+      "rows": 0,
+      "fragments": 0,
+      "fragment_ids": [],
+      "fragment_rows": [],
+      "fragment_physical_rows": [],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [],
+      "data_storage_version": "2.1",
+      "file_format_versions": [],
+      "history": [
+        {"version": 1, "rows": 0}
+      ],
+      "expected": "expected/empty_b.jsonl",
+      "expected_rows": 0,
+      "notes": [
+        "pylance writes no fragment at all for an empty table, so this dataset has a schema and nothing else"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "c_uint64", "arrow_type": "uint64", "arrow_format": "L", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"}
+      ]
+    },
     "frag_1": {
       "name": "frag_1",
       "purpose": "1 fragment(s) of 5 rows: fragment-count coverage for the 3-segment modulo split.",

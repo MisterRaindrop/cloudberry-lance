@@ -20,7 +20,7 @@ from conftest import dataset_path
 
 #: WORKPLAN §2.0 freezes these names; 'big' is opt-in and not listed here.
 FROZEN_NAMES = [
-    "types_all", "types_b", "deleted", "empty",
+    "types_all", "types_b", "deleted", "empty", "empty_b",
     "frag_1", "frag_2", "frag_3", "frag_7", "frag_100", "frag_gap",
     "evolved", "blob", "large_text", "versions", "strict",
 ]

@@ -121,9 +121,18 @@ SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_empty_nocolumn$$
 CREATE FOREIGN TABLE lance_regress.errs_empty_coord (id text)
   SERVER errs_files OPTIONS (uri 'empty.lance', mpp_execute 'coordinator');
 SELECT lance_regress.message($$SELECT id FROM lance_regress.errs_empty_coord$$) AS empty_bad_type_coordinator;
+-- A B-tier column on a dataset with no fragments at all: types_b.lance has
+-- rows, so its refusal comes from the stream converter and would still happen
+-- with the schema check gone.  empty_b.lance is zero rows and zero fragments,
+-- so only the dataset schema can refuse it (I8).
 CREATE FOREIGN TABLE lance_regress.errs_empty_btier (id integer, c_uint64 bigint)
-  SERVER errs_files OPTIONS (uri 'types_b.lance', mpp_execute 'coordinator');
-SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier$$) AS btier_coordinator;
+  SERVER errs_files OPTIONS (uri 'empty_b.lance');
+SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier$$) AS empty_btier;
+CREATE FOREIGN TABLE lance_regress.errs_empty_btier_coord (id integer, c_uint64 bigint)
+  SERVER errs_files OPTIONS (uri 'empty_b.lance', mpp_execute 'coordinator');
+SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier_coord$$) AS empty_btier_coordinator;
+-- The A-tier column of the same empty dataset still reads its zero rows.
+SELECT count(*) AS rows, count(id) AS non_null_id FROM lance_regress.errs_empty_btier;
 -- A declaration that does match reads its zero rows, and count(*) asks for no
 -- column at all, so it never had a projection to check.
 CREATE FOREIGN TABLE lance_regress.errs_empty_ok (id integer, v text, n bigint)

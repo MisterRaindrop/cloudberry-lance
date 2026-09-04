@@ -24,6 +24,7 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/fmgrprotos.h"
+#include "mb/pg_wchar.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
@@ -368,6 +369,8 @@ static Datum
 lance_conv_text(LanceConverter *conv, int64 row)
 {
 	struct ArrowStringView sv = ArrowArrayViewGetStringUnsafe(&conv->view, row);
+	char	   *converted;
+	Datum		result;
 
 	lance_check_varlena_size(conv, sv.size_bytes);
 
@@ -375,8 +378,26 @@ lance_conv_text(LanceConverter *conv, int64 row)
 	if (sv.size_bytes == 0)
 		return PointerGetDatum(cstring_to_text_with_len("", 0));
 
-	return PointerGetDatum(cstring_to_text_with_len(sv.data,
-													(int) sv.size_bytes));
+	/*
+	 * Arrow says the bytes are UTF-8; a PostgreSQL text datum has to be in the
+	 * database encoding, and may not contain a zero byte at all.  Copying the
+	 * bytes in unchecked would mean mojibake in a LATIN1 database and a text
+	 * value that pg_verify_mbstr would have rejected in a UTF-8 one, both of
+	 * them silent (I7).  pg_any_to_server converts where the encodings differ
+	 * and validates where they do not, raising PostgreSQL's own "invalid byte
+	 * sequence" error; the cost is one pass over the value, which is what
+	 * every other reader of external text pays too.
+	 */
+	converted = pg_any_to_server(sv.data, (int) sv.size_bytes, PG_UTF8);
+
+	if ((const char *) converted == sv.data)
+		return PointerGetDatum(cstring_to_text_with_len(sv.data,
+														(int) sv.size_bytes));
+
+	result = PointerGetDatum(cstring_to_text(converted));
+	pfree(converted);
+
+	return result;
 }
 
 static Datum
@@ -809,6 +830,29 @@ lance_decimal_fits(const struct ArrowSchemaView *view, int32 pgtypmod)
  * NULL means the declaration does not fit, which the caller reports as the one
  * type-mismatch error.
  */
+/*
+ * The fewest fractional digits a declaration must keep to hold every value of
+ * an Arrow timestamp unit exactly.  Seconds and milliseconds need fewer than
+ * six: a timestamp(0) holds whole seconds without rounding anything away, and
+ * refusing it would refuse a declaration that cannot lose a thing.
+ */
+static int32
+lance_timestamp_min_typmod(enum ArrowTimeUnit unit)
+{
+	switch (unit)
+	{
+		case NANOARROW_TIME_UNIT_SECOND:
+			return 0;
+		case NANOARROW_TIME_UNIT_MILLI:
+			return 3;
+		case NANOARROW_TIME_UNIT_MICRO:
+		case NANOARROW_TIME_UNIT_NANO:
+			return LANCE_TIMESTAMP_TYPMOD;
+	}
+
+	return LANCE_TIMESTAMP_TYPMOD;
+}
+
 static LanceConvertFn
 lance_resolve_timestamp(const struct ArrowSchemaView *view, Oid pgtypid,
 						int32 pgtypmod)
@@ -819,7 +863,8 @@ lance_resolve_timestamp(const struct ArrowSchemaView *view, Oid pgtypid,
 		return NULL;
 
 	/* -1 is "no precision given", which keeps all six digits. */
-	if (pgtypmod >= 0 && pgtypmod < LANCE_TIMESTAMP_TYPMOD)
+	if (pgtypmod >= 0 &&
+		pgtypmod < lance_timestamp_min_typmod(view->time_unit))
 		return NULL;
 
 	switch (view->time_unit)

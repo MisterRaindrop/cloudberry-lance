@@ -105,3 +105,42 @@ SELECT id, c_float16, c_fsl_f32_4 FROM lance_regress.tyerr_ok
   WHERE id IN (2, 4) ORDER BY id;
 -- After all of that the same backend still reads a real dataset.
 SELECT count(*) AS rows FROM lance_regress.tyerr_ok;
+-- A declared precision only has to hold the digits the Arrow unit has: a
+-- timestamp[s] cannot lose anything to timestamp(0), nor a timestamp[ms] to
+-- timestamp(3).  Both are refused for microseconds, which is the case above.
+-- Narrowing must also change no value, which is what the EXCEPT says.
+CREATE FOREIGN TABLE lance_regress.tyerr_ts_narrow (
+  id integer, c_ts_s timestamp(0), c_ts_ms timestamp(3), c_ts_s_tz timestamptz(0)
+) SERVER tyerr_files OPTIONS (uri 'types_all.lance');
+CREATE FOREIGN TABLE lance_regress.tyerr_ts_wide (
+  id integer, c_ts_s timestamp, c_ts_ms timestamp(6), c_ts_s_tz timestamptz
+) SERVER tyerr_files OPTIONS (uri 'types_all.lance');
+SELECT count(c_ts_s) AS ts_s, count(c_ts_ms) AS ts_ms, count(c_ts_s_tz) AS ts_s_tz
+  FROM lance_regress.tyerr_ts_narrow;
+SELECT count(*) AS narrowing_changed_a_value FROM (
+  SELECT * FROM lance_regress.tyerr_ts_narrow
+  EXCEPT SELECT * FROM lance_regress.tyerr_ts_wide) d;
+-- Values PostgreSQL cannot represent are refused per value, not rounded and
+-- not truncated (I7).  strict.lance holds a nanosecond timestamp that is not a
+-- whole microsecond and a string with a zero byte in it, each next to an
+-- ordinary value of the same type that has to keep working.
+CREATE FOREIGN TABLE lance_regress.tyerr_strict (
+  id integer,
+  ts_ns_aligned timestamp,
+  ts_ns_odd timestamp,
+  s_plain text,
+  s_nul text
+) SERVER tyerr_files OPTIONS (uri 'strict.lance');
+SELECT lance_regress.message($$SELECT ts_ns_odd FROM lance_regress.tyerr_strict$$) AS ns_not_whole_microseconds;
+SELECT lance_regress.message($$SELECT s_nul FROM lance_regress.tyerr_strict$$) AS text_with_a_zero_byte;
+-- Same as the types suite: pg_regress runs psql with PGDATESTYLE=Postgres,MDY
+-- and PGTZ=PST8PDT, and a timestamp is easier to check against the fixture in
+-- the form the reference file uses.
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+SELECT id, ts_ns_aligned, to_json(s_plain) AS s_plain
+  FROM lance_regress.tyerr_strict ORDER BY id;
+RESET timezone;
+RESET DateStyle;
+SELECT count(*) AS rows, count(ts_ns_aligned) AS aligned, count(s_plain) AS plain
+  FROM lance_regress.tyerr_strict;

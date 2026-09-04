@@ -56,9 +56,10 @@ S3_SECRET=
 say() { echo "$TAG: $*"; }
 die() { echo "$TAG: $*" >&2; exit 1; }
 
-# The usage block of the calling script: its comment header, minus the '#'.
+# The comment header of the calling script, minus the shebang and the '#', is
+# its usage message: everything up to the first line that is not a comment.
 usage_from_header() {
-	sed -n "2,${2:-30}p" "$1" | sed 's/^# \{0,1\}//'
+	sed -e '1d' -e '/^[^#]/,$d' "$1" | sed 's/^# \{0,1\}//'
 }
 
 require_docker() {

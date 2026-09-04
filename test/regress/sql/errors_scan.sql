@@ -95,10 +95,11 @@ SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_struct$$) AS str
 CREATE FOREIGN TABLE lance_regress.errs_uint64 (c_uint64 bigint)
   SERVER errs_files OPTIONS (uri 'types_b.lance');
 SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_uint64$$) AS uint64_into_bigint;
--- A column the dataset does not have at all: lance-c refuses the projection.
+-- A column the dataset does not have at all, refused by name before anything
+-- is read.
 CREATE FOREIGN TABLE lance_regress.errs_nocolumn (id integer, no_such_column text)
   SERVER errs_files OPTIONS (uri 'frag_3.lance');
-SELECT lance_regress.capture($$SELECT * FROM lance_regress.errs_nocolumn$$) AS unknown_column;
+SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_nocolumn$$) AS unknown_column;
 -- A column that is only in the way is not read, so the same table works as
 -- long as nothing selects it.
 SELECT count(*) AS rows_without_it FROM lance_regress.errs_nocolumn;
@@ -106,3 +107,26 @@ SELECT count(*) AS rows_without_it FROM lance_regress.errs_nocolumn;
 CREATE FOREIGN TABLE lance_regress.errs_ok (id integer, v text, n bigint)
   SERVER errs_files OPTIONS (uri 'frag_3.lance');
 SELECT count(*) AS rows, sum(n) AS sum_n FROM lance_regress.errs_ok;
+-- A dataset with no fragments still has a schema, and a declaration that does
+-- not match it is wrong whether or not there is a row to prove it on: nothing
+-- opens a stream here, so the check has to come from the dataset's own schema
+-- (AC4, I7, I8).  Both execution modes reach it by a different path - the
+-- coordinator on behalf of every segment, or one process reading everything.
+CREATE FOREIGN TABLE lance_regress.errs_empty_badtype (id text)
+  SERVER errs_files OPTIONS (uri 'empty.lance');
+SELECT lance_regress.message($$SELECT id FROM lance_regress.errs_empty_badtype$$) AS empty_bad_type;
+CREATE FOREIGN TABLE lance_regress.errs_empty_nocolumn (id integer, no_such_column text)
+  SERVER errs_files OPTIONS (uri 'empty.lance');
+SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_empty_nocolumn$$) AS empty_unknown_column;
+CREATE FOREIGN TABLE lance_regress.errs_empty_coord (id text)
+  SERVER errs_files OPTIONS (uri 'empty.lance', mpp_execute 'coordinator');
+SELECT lance_regress.message($$SELECT id FROM lance_regress.errs_empty_coord$$) AS empty_bad_type_coordinator;
+CREATE FOREIGN TABLE lance_regress.errs_empty_btier (id integer, c_uint64 bigint)
+  SERVER errs_files OPTIONS (uri 'types_b.lance', mpp_execute 'coordinator');
+SELECT lance_regress.message($$SELECT c_uint64 FROM lance_regress.errs_empty_btier$$) AS btier_coordinator;
+-- A declaration that does match reads its zero rows, and count(*) asks for no
+-- column at all, so it never had a projection to check.
+CREATE FOREIGN TABLE lance_regress.errs_empty_ok (id integer, v text, n bigint)
+  SERVER errs_files OPTIONS (uri 'empty.lance');
+SELECT count(*) AS rows, count(v) AS non_null_v FROM lance_regress.errs_empty_ok;
+SELECT count(*) AS rows_coordinator FROM lance_regress.errs_empty_coord;

@@ -186,7 +186,20 @@ lance_scan_open_dataset(LanceScanState *state, uint64 version)
 	LANCE_CHECK(state->dataset != NULL, state->uri);
 	state->ds_handle = lance_rt_track_dataset(state->dataset);
 
+	/*
+	 * Interrupts are checked here rather than inside the masked region: the
+	 * open may have taken a while, and the handle is registered by now, so an
+	 * ERROR from this point on still closes the dataset (A5, I6).
+	 */
+	CHECK_FOR_INTERRUPTS();
+
+	/*
+	 * Version numbering starts at 1, so a zero is lance-c's error sentinel and
+	 * not a version: publishing it would send every QE off to read "latest"
+	 * instead of the snapshot this statement pinned (I3).
+	 */
 	LANCE_MASKED(state->version = lance_dataset_version(state->dataset));
+	LANCE_CHECK(state->version > 0, state->uri);
 }
 
 static void
@@ -208,6 +221,19 @@ lance_scan_list_fragments(LanceScanState *state)
 	uint64		count;
 
 	LANCE_MASKED(count = lance_dataset_fragment_count(state->dataset));
+
+	/*
+	 * The count is a uint64 that becomes an int, an allocation and a
+	 * space-separated list inside the plan.  A dataset far beyond what any of
+	 * those can hold has to say so rather than wrap around into a share that
+	 * misses fragments.
+	 */
+	if (count > (uint64) Min(PG_INT32_MAX, MaxAllocSize / sizeof(uint64)))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("lance_fdw: dataset has " UINT64_FORMAT " fragments, more than this wrapper can plan",
+						count),
+				 errdetail("While reading uri %s.", state->uri)));
 
 	state->total_fragments = (int) count;
 	state->nids = (int) count;
@@ -295,6 +321,86 @@ lance_scan_build_converters(LanceScanState *state, Relation rel)
 	}
 }
 
+/*
+ * Check the projection against the dataset's own schema (AC4, I7, I8).
+ *
+ * The schema the stream reports is only checked where there is something to
+ * read (lance_scan_build_converters), so a dataset with no fragments would
+ * otherwise accept a foreign table that names columns Lance does not have, or
+ * types it cannot convert: nothing opens a stream, and the scan quietly
+ * returns no rows.  The same holds for the QD under all segments, which never
+ * reads and whose QEs may all have empty shares.
+ *
+ * The dataset schema comes out of the manifest that opening it already read,
+ * so this is no further I/O (I13).  The converters are resolved into
+ * state->converters and reset again: they are the same objects the scan would
+ * build, which is what makes this the same check rather than a second opinion,
+ * and putting them there means the reset callback frees their nanoarrow views
+ * even when resolving one of them raises the error this exists to raise (I6).
+ */
+static void
+lance_scan_validate_projection(LanceScanState *state, Relation rel)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	struct ArrowSchema schema;
+	int32		rc;
+	int			i;
+
+	if (state->ncolumns == 0)
+		return;					/* count(*) asks Lance for no column at all */
+
+	memset(&schema, 0, sizeof(schema));
+	LANCE_MASKED(rc = lance_dataset_schema(state->dataset, &schema));
+	LANCE_CHECK(rc == 0, state->uri);
+
+	PG_TRY();
+	{
+		state->converters = (LanceConverter *)
+			palloc0(sizeof(LanceConverter) * state->ncolumns);
+
+		for (i = 0; i < state->ncolumns; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, state->attnums[i] - 1);
+			struct ArrowSchema *field = NULL;
+			int64		c;
+
+			for (c = 0; c < schema.n_children; c++)
+			{
+				struct ArrowSchema *child = schema.children[c];
+
+				if (child != NULL && child->name != NULL &&
+					strcmp(child->name, state->columns[i]) == 0)
+				{
+					field = child;
+					break;
+				}
+			}
+
+			if (field == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("lance_fdw: column \"%s\": the dataset has no such column",
+								state->columns[i]),
+						 errdetail("While reading uri %s.", state->uri),
+						 errhint("Use IMPORT FOREIGN SCHEMA, or the column_name "
+								 "option where the two names differ.")));
+
+			lance_arrow_resolve_converter(field, att->atttypid, att->atttypmod,
+										  &state->converters[i]);
+		}
+
+		for (i = 0; i < state->ncolumns; i++)
+			lance_arrow_converter_reset(&state->converters[i]);
+		state->converters = NULL;
+	}
+	PG_FINALLY();
+	{
+		if (schema.release != NULL)
+			LANCE_MASKED(schema.release(&schema));
+	}
+	PG_END_TRY();
+}
+
 static void
 lance_scan_log_share(const LanceScanState *state, const char *what)
 {
@@ -351,9 +457,13 @@ lance_scan_begin_internal(ForeignScanState *node, LanceScanState *state,
 		 * and reads nothing (I1).  Every QE of this statement then opens that
 		 * exact version, so they all see one snapshot (I3).
 		 */
+		int			nsegments = table->num_segments > 0 ? table->num_segments
+			: getgpsegmentCount();
+
 		lance_scan_open_dataset(state, state->opts.version);
+		lance_scan_validate_projection(state, rel);
 		lance_scan_list_fragments(state);
-		lance_dispatch_publish(fsplan, state->uri, state->version,
+		lance_dispatch_publish(fsplan, state->uri, state->version, nsegments,
 							   state->ids, state->nids);
 		lance_scan_log_share(state, "dispatching");
 		lance_scan_close_dataset(state);
@@ -367,7 +477,8 @@ lance_scan_begin_internal(ForeignScanState *node, LanceScanState *state,
 		state->uri = units.uri;
 		state->version = units.version;
 		state->ids = units.ids;
-		state->nids = lance_dispatch_take_share(units.ids, units.nids);
+		state->nids = lance_dispatch_take_share(units.ids, units.nids,
+												units.nsegments);
 		lance_scan_log_share(state, "reading");
 
 		/* An empty share is not an error, and it is not I/O either. */
@@ -379,6 +490,21 @@ lance_scan_begin_internal(ForeignScanState *node, LanceScanState *state,
 	else
 	{
 		/*
+		 * A QE of a dispatched all-segments statement must have found units:
+		 * the QD writes them into the plan before dispatch.  Reading
+		 * everything here instead would return this dataset once per segment
+		 * and, opening its own version, could tear the statement's snapshot -
+		 * so an unpublished plan is an error, not a fallback (I2, I3).
+		 */
+		if (all_segments && Gp_role == GP_ROLE_EXECUTE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("lance_fdw: the dispatched plan carries no scan units"),
+					 errdetail("Foreign table \"%s\" runs on all segments, so the "
+							   "coordinator has to publish the fragment list.",
+							   RelationGetRelationName(rel))));
+
+		/*
 		 * mpp_execute 'coordinator' or 'any', or a utility-mode backend with
 		 * nobody to dispatch to: this process reads every fragment itself.
 		 */
@@ -388,6 +514,11 @@ lance_scan_begin_internal(ForeignScanState *node, LanceScanState *state,
 
 		if (state->nids == 0)
 		{
+			/*
+			 * Nothing to read still has a projection to check, and this
+			 * process is the only one that will ever see the schema (AC4).
+			 */
+			lance_scan_validate_projection(state, rel);
 			lance_scan_close_dataset(state);
 			return;
 		}
@@ -481,6 +612,15 @@ lance_scan_next_batch(LanceScanState *state)
 		return false;
 
 	LANCE_MASKED(rc = state->stream->get_next(state->stream, &state->batch));
+
+	/*
+	 * Signals were blocked for the whole read, so anything that arrived during
+	 * it was delivered on the restore just now and is acted on here rather
+	 * than one batch later (A5).  The batch, if there is one, is freed by the
+	 * scan context's reset callback on the way out.
+	 */
+	CHECK_FOR_INTERRUPTS();
+
 	if (rc != 0)
 	{
 		/*

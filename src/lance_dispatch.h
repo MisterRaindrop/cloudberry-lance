@@ -35,6 +35,7 @@ typedef struct LanceScanUnits
 	char	   *kind;			/* "fragment" in this block */
 	char	   *uri;
 	uint64		version;		/* the exact version the QD pinned (D4) */
+	int			nsegments;		/* the width the planner built the locus for */
 	uint64	   *ids;
 	int			nids;
 } LanceScanUnits;
@@ -47,6 +48,7 @@ typedef struct LanceScanUnits
 extern void lance_dispatch_publish(ForeignScan *fsplan,
 								   const char *uri,
 								   uint64 version,
+								   int nsegments,
 								   const uint64 *ids,
 								   int nids);
 
@@ -60,7 +62,7 @@ extern bool lance_dispatch_read_units(const ForeignScan *fsplan,
  * split from values the statement already shares, so the shares are disjoint
  * and complete without anyone coordinating.
  */
-extern int	lance_dispatch_take_share(uint64 *ids, int nids);
+extern int	lance_dispatch_take_share(uint64 *ids, int nids, int nsegments);
 
 /* Fragment ids as a readable list, for DEBUG1 and error detail. */
 extern char *lance_dispatch_ids_string(const uint64 *ids, int nids);

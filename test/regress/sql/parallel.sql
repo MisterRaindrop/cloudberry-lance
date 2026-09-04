@@ -72,3 +72,33 @@ $$;
 CREATE FOREIGN TABLE lance_regress.par_3_server_coord (id integer, v text, n bigint)
   SERVER par_coord OPTIONS (uri 'frag_3.lance');
 SELECT count(*) AS rows, sum(n) AS sum_n FROM lance_regress.par_3_server_coord;
+-- A foreign table or its server may narrow the execution width with
+-- num_segments, and Cloudberry then runs the scan on contents 0..N-1 only.
+-- The split has to use that same N: dividing the fragments among every content
+-- of the cluster would leave the ones belonging to a segment that never runs
+-- unread (I2).  Row counts are the whole dataset either way; what changes is
+-- the shape, and with three fragments over two segments it is 1 + 2.
+CREATE FOREIGN TABLE lance_regress.par_3_two (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_3.lance', num_segments '2');
+CREATE FOREIGN TABLE lance_regress.par_3_one (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_3.lance', num_segments '1');
+CREATE FOREIGN TABLE lance_regress.par_7_two (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_7.lance', num_segments '2');
+SELECT count(*) AS rows, count(DISTINCT id) AS ids, sum(n) AS sum_n FROM lance_regress.par_3_two;
+SELECT count(*) AS rows, count(DISTINCT id) AS ids, sum(n) AS sum_n FROM lance_regress.par_3_one;
+SELECT count(*) AS rows, count(DISTINCT id) AS ids, sum(n) AS sum_n FROM lance_regress.par_7_two;
+-- Repeated, because the rotation moves the shares between the two segments
+-- that do run.
+SELECT count(*) AS again FROM lance_regress.par_3_two;
+SELECT count(*) AS again FROM lance_regress.par_3_two;
+SELECT array_agg(c ORDER BY c) AS per_segment
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_3_two GROUP BY 1) s;
+SELECT array_agg(c ORDER BY c) AS per_segment
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_3_one GROUP BY 1) s;
+SELECT array_agg(c ORDER BY c) AS per_segment
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_7_two GROUP BY 1) s;
+-- And the rows themselves are the same rows.
+SELECT count(*) AS narrow_only FROM (
+  SELECT * FROM lance_regress.par_3_two EXCEPT SELECT * FROM lance_regress.par_3) d;
+SELECT count(*) AS wide_only FROM (
+  SELECT * FROM lance_regress.par_3 EXCEPT SELECT * FROM lance_regress.par_3_two) d;

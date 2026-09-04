@@ -22,7 +22,7 @@ from conftest import dataset_path
 FROZEN_NAMES = [
     "types_all", "types_b", "deleted", "empty",
     "frag_1", "frag_2", "frag_3", "frag_7", "frag_100", "frag_gap",
-    "evolved", "blob", "large_text", "versions",
+    "evolved", "blob", "large_text", "versions", "strict",
 ]
 
 #: Every A-tier Arrow type of DESIGN §2 has to appear in types_all.  Losing a
@@ -254,6 +254,31 @@ def test_blob_column_keeps_the_lance_blob_encoding(manifest, opened):
     col = {c["name"]: c for c in entry(manifest, "blob")["schema"]}["blob"]
     assert col["arrow_type"] == "large_binary"
     assert col["expected_encoding"] == "bytes-digest"
+
+
+def test_strict_holds_values_postgresql_cannot_represent(opened):
+    """The point of this fixture is the values themselves, so check them.
+
+    A regress suite asserting "reading this column errors" proves nothing if
+    the fixture stopped containing anything unrepresentable.  The nanosecond
+    columns are read as int64: pyarrow itself refuses to turn 1234567 ns into a
+    Python datetime, which is the same limit PostgreSQL has.
+    """
+    t = opened("strict").to_table()
+
+    def ns(name):
+        return [v for v in t.column(name).cast(pa.int64()).to_pylist()
+                if v is not None]
+
+    odd, aligned = ns("ts_ns_odd"), ns("ts_ns_aligned")
+    assert odd, "ts_ns_odd lost its values"
+    assert all(v % 1000 != 0 for v in odd), odd
+    assert aligned, "ts_ns_aligned lost its values"
+    assert all(v % 1000 == 0 for v in aligned), aligned
+
+    assert [v for v in t.column("s_nul").to_pylist() if v and "\x00" in v], \
+        "s_nul lost its zero byte"
+    assert all("\x00" not in (v or "") for v in t.column("s_plain").to_pylist())
 
 
 def test_blob_and_large_text_reach_the_advertised_sizes(fixtures_root, manifest):

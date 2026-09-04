@@ -447,6 +447,37 @@
         {"name": "v", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
         {"name": "n", "arrow_type": "int64", "arrow_format": "l", "nullable": true, "tier": "A", "pg_type": "bigint", "metadata": null, "expected_encoding": "int"}
       ]
+    },
+    "strict": {
+      "name": "strict",
+      "purpose": "Per-value strictness: a nanosecond timestamp that is not a whole microsecond, and a string carrying a zero byte.",
+      "path": "data/strict.lance",
+      "version": 1,
+      "rows": 3,
+      "fragments": 1,
+      "fragment_ids": [0],
+      "fragment_rows": [3],
+      "fragment_physical_rows": [3],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1],
+      "data_storage_version": "2.1",
+      "file_format_versions": ["2.1"],
+      "history": [
+        {"version": 1, "rows": 3}
+      ],
+      "expected": "expected/strict.jsonl",
+      "expected_rows": 3,
+      "notes": [
+        "ts_ns_odd row 0 is 1234567 ns and row 1 ends in 789 ns: neither is a whole microsecond",
+        "s_nul row 0 holds a zero byte, which a PostgreSQL text datum cannot contain at all"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "ts_ns_aligned", "arrow_type": "timestamp[ns]", "arrow_format": "tsn:", "nullable": true, "tier": "A", "pg_type": "timestamp(6)", "metadata": null, "expected_encoding": "timestamp"},
+        {"name": "ts_ns_odd", "arrow_type": "timestamp[ns]", "arrow_format": "tsn:", "nullable": true, "tier": "A", "pg_type": "timestamp(6)", "metadata": null, "expected_encoding": "timestamp"},
+        {"name": "s_plain", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
+        {"name": "s_nul", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"}
+      ]
     }
   }
 }

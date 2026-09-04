@@ -88,6 +88,17 @@ check-syntax:
 	done; \
 	echo "check-syntax: all sources parse"
 
+# The gate scripts cannot run here (no docker), so the most this host can do is
+# parse them.
+.PHONY: check-scripts
+check-scripts:
+	@set -e; \
+	for f in test/gate/*.sh; do \
+		echo "  BASH -n  $$f"; \
+		bash -n $$f; \
+	done; \
+	echo "check-scripts: all scripts parse"
+
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs 2>/dev/null)
 

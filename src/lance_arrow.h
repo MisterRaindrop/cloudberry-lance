@@ -42,4 +42,12 @@ extern bool lance_arrow_is_blob_encoded(const struct ArrowSchema *field);
 /* Field format string, for error and notice messages; never NULL. */
 extern const char *lance_arrow_format(const struct ArrowSchema *field);
 
+/*
+ * Readable name of the field's Arrow type ("uint64", "dictionary", ...), for
+ * messages where the format string alone would be cryptic - a dictionary
+ * column, for one, has the format string of its index type.  NULL when the
+ * schema does not parse.
+ */
+extern const char *lance_arrow_type_name(const struct ArrowSchema *field);
+
 #endif							/* LANCE_ARROW_H */

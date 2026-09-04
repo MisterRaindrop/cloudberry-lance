@@ -135,6 +135,9 @@ lance_reject_value(const char *name, const char *value, const char *expected)
 			 errdetail("%s", expected)));
 }
 
+#define LANCE_VERSION_EXPECTED \
+	"The version must be a non-negative integer; 0 means the latest version."
+
 static uint64
 lance_parse_version(const char *name, const char *value)
 {
@@ -142,22 +145,19 @@ lance_parse_version(const char *name, const char *value)
 	unsigned long long parsed;
 
 	if (value[0] == '\0')
-		lance_reject_value(name, value,
-						   "version must be a non-negative integer, 0 meaning the latest version.");
+		lance_reject_value(name, value, LANCE_VERSION_EXPECTED);
 
 	/* strtoull happily eats a leading '-'; Lance versions are unsigned. */
 	for (endptr = (char *) value; *endptr != '\0'; endptr++)
 	{
 		if (*endptr < '0' || *endptr > '9')
-			lance_reject_value(name, value,
-							   "version must be a non-negative integer, 0 meaning the latest version.");
+			lance_reject_value(name, value, LANCE_VERSION_EXPECTED);
 	}
 
 	errno = 0;
 	parsed = strtoull(value, &endptr, 10);
 	if (errno != 0 || *endptr != '\0')
-		lance_reject_value(name, value,
-						   "version must be a non-negative integer, 0 meaning the latest version.");
+		lance_reject_value(name, value, LANCE_VERSION_EXPECTED);
 
 	return (uint64) parsed;
 }
@@ -171,7 +171,8 @@ lance_parse_batch_size(const char *name, const char *value)
 	errno = 0;
 	parsed = strtoll(value, &endptr, 10);
 	if (errno != 0 || endptr == value || *endptr != '\0' || parsed <= 0)
-		lance_reject_value(name, value, "batch_size must be a positive integer.");
+		lance_reject_value(name, value,
+						   "The batch size must be a positive integer.");
 
 	return (int64) parsed;
 }
@@ -186,7 +187,8 @@ lance_parse_rows_hint(const char *name, const char *value)
 	parsed = strtod(value, &endptr);
 	if (errno != 0 || endptr == value || *endptr != '\0' ||
 		isnan(parsed) || isinf(parsed) || parsed <= 0.0)
-		lance_reject_value(name, value, "rows_hint must be a positive number.");
+		lance_reject_value(name, value,
+						   "The row estimate must be a positive number.");
 
 	return parsed;
 }
@@ -198,7 +200,7 @@ lance_parse_boolean(const char *name, const char *value)
 
 	if (!parse_bool(value, &result))
 		lance_reject_value(name, value,
-						   "the value must be a boolean, for example true or false.");
+						   "The value must be a boolean, for example true or false.");
 	return result;
 }
 
@@ -212,7 +214,7 @@ lance_check_mpp_execute(const char *name, const char *value)
 		return;
 
 	lance_reject_value(name, value,
-					   "mpp_execute must be any, coordinator or all segments.");
+					   "Valid values are any, coordinator and all segments.");
 }
 
 /*

@@ -66,9 +66,14 @@ lance_import_columns(StringInfo buf, ImportForeignSchemaStmt *stmt,
 						(errmsg("skipping column \"%s\" of \"%s\": Lance blob encoding is not supported",
 								colname, name)));
 			else
+			{
+				const char *typname = lance_arrow_type_name(field);
+
 				ereport(NOTICE,
-						(errmsg("skipping column \"%s\" of \"%s\": Arrow type \"%s\" is not supported",
-								colname, name, lance_arrow_format(field))));
+						(errmsg("skipping column \"%s\" of \"%s\": Arrow type \"%s\" (%s) is not supported",
+								colname, name, lance_arrow_format(field),
+								typname != NULL ? typname : "unparsable")));
+			}
 			nskipped++;
 			continue;
 		}

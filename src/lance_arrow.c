@@ -38,6 +38,22 @@ lance_arrow_format(const struct ArrowSchema *field)
 	return field->format;
 }
 
+const char *
+lance_arrow_type_name(const struct ArrowSchema *field)
+{
+	struct ArrowSchemaView view;
+	struct ArrowError error;
+
+	if (field == NULL || field->format == NULL)
+		return NULL;
+
+	memset(&error, 0, sizeof(error));
+	if (ArrowSchemaViewInit(&view, field, &error) != NANOARROW_OK)
+		return NULL;
+
+	return ArrowTypeString(view.type);
+}
+
 /*
  * Look one key up in an Arrow field's metadata.  The metadata is the binary
  * key/value encoding of the C data interface, so it goes through nanoarrow's

@@ -278,6 +278,19 @@ export PGPORT=\$QD_PORT
 cd \"\$REMOTE\"
 $clean_step
 
+# AC1: building against a lance-c that is supplied from outside has to work
+# too.  Point the override at the submodule's own artefacts: no cargo run, no
+# liblance_c.so installed, and the rpath goes to where the library already is.
+if [ -f third_party/lance-c/target/release/liblance_c.so ]; then
+	echo '== make with the LANCE_C_PREFIX override =='
+	make -s clean
+	make -s \\
+		LANCE_C_INCDIR=\"\$REMOTE/third_party/lance-c/include\" \\
+		LANCE_C_LIBDIR=\"\$REMOTE/third_party/lance-c/target/release\" \\
+		LANCE_C_PREFIX=\"\$REMOTE/third_party/lance-c\"
+	make -s clean
+fi
+
 echo '== make =='
 time make -s
 

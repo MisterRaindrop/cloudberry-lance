@@ -62,27 +62,27 @@ again
 -- fragment, two for two, and 7 or 100 fragments spread as evenly as a modulo
 -- can spread them.
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_1 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_1 GROUP BY 1) s;
 per_segment
 {5}
 (1 row)
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_2 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_2 GROUP BY 1) s;
 per_segment
 {5,5}
 (1 row)
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_3 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_3 GROUP BY 1) s;
 per_segment
 {5,5,5}
 (1 row)
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_7 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_7 GROUP BY 1) s;
 per_segment
 {10,10,15}
 (1 row)
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_100 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_100 GROUP BY 1) s;
 per_segment
 {33,33,34}
 (1 row)

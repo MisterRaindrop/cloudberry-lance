@@ -38,15 +38,15 @@ SELECT count(*) AS again FROM lance_regress.par_7;
 -- fragment, two for two, and 7 or 100 fragments spread as evenly as a modulo
 -- can spread them.
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_1 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_1 GROUP BY 1) s;
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_2 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_2 GROUP BY 1) s;
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_3 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_3 GROUP BY 1) s;
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_7 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_7 GROUP BY 1) s;
 SELECT array_agg(c ORDER BY c) AS per_segment
-  FROM (SELECT gp_segment_id, count(*) AS c FROM lance_regress.par_100 GROUP BY 1) s;
+  FROM (SELECT gp_execution_segment() AS seg, count(*) AS c FROM lance_regress.par_100 GROUP BY 1) s;
 -- The debugging execution modes read every fragment in one process and have to
 -- return exactly the same rows (I11).
 CREATE FOREIGN TABLE lance_regress.par_3_coord (id integer, v text, n bigint)

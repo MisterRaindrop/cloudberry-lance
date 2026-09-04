@@ -9,18 +9,14 @@ The wrapper is read-only. It talks to Lance through
 decodes the Arrow batches it returns with a vendored copy of
 [nanoarrow](https://github.com/apache/arrow-nanoarrow).
 
-**State of this build: the MPP scan, over the core types.** Servers, user
-mappings, foreign tables, `IMPORT FOREIGN SCHEMA` and `SELECT` all work, and the
-scan runs on every segment. The value converters cover booleans, the integer
-family, `float32`/`float64`, the string family and the binary family; the
-remaining A-tier types (`float16`, `date32`, `timestamp`, `decimal128`,
-`fixed_size_list`, `list`) are still refused, by name, with
-
-```
-ERROR:  lance_fdw: column "c_ts_us": Lance type "tsu:" (timestamp) is not supported in this build and cannot be read as timestamp without time zone
-```
-
-They land in the next change; see [Types](#types).
+**State of this build: the MPP scan, over every A-tier type.** Servers, user
+mappings, foreign tables, `IMPORT FOREIGN SCHEMA` and `SELECT` all work, the
+scan runs on every segment, and the value converters cover the whole A-tier
+list — booleans, the integer family, the three float widths, the string and
+binary families, `date32`, `timestamp` in all four units with and without a
+zone, `decimal128`, `fixed_size_list<float>` embeddings and one-dimensional
+`list`s. Everything else is refused by name rather than guessed at; see
+[Types](#types).
 
 ## Building
 
@@ -223,24 +219,39 @@ message naming the column, the Arrow type and the declared type.
 | `int8`, `int16`, `uint8` | `smallint` | yes |
 | `int32`, `uint16` | `integer` | yes |
 | `int64`, `uint32` | `bigint` | yes |
-| `float32` | `real` | yes |
+| `float16`, `float32` | `real` | yes |
 | `float64` | `double precision` | yes |
 | `utf8`, `large_utf8` | `text` | yes |
 | `binary`, `large_binary` | `bytea` | yes |
-| `float16` | `real` | not yet |
-| `date32` | `date` | not yet |
-| `timestamp(s\|ms\|us\|ns)` without a zone | `timestamp(6)` | not yet |
-| `timestamp(s\|ms\|us\|ns)` with a zone | `timestamptz(6)` — the value is a UTC epoch and the zone name is not kept | not yet |
-| `decimal128(p,s)` | `numeric(p,s)` | not yet |
-| `fixed_size_list<float32, N>` | `real[]` | not yet |
-| `fixed_size_list<float64, N>` | `double precision[]` | not yet |
-| `list<T>` where T is a scalar above | that type's one-dimensional array | not yet |
+| `date32` | `date` | yes |
+| `timestamp(s\|ms\|us\|ns)` without a zone | `timestamp(6)` | yes |
+| `timestamp(s\|ms\|us\|ns)` with a zone | `timestamptz(6)` — the value is a UTC epoch and the zone name is not kept | yes |
+| `decimal128(p,s)` | `numeric(p,s)` | yes |
+| `fixed_size_list<float32, N>` | `real[]` | yes |
+| `fixed_size_list<float64, N>` | `double precision[]` | yes |
+| `list<T>` where T is a scalar above | that type's one-dimensional array | yes |
 
-Widening is allowed only where it cannot lose anything: `int32` into `bigint`
-yes, `int64` into `integer` no — that one is an error at the start of the scan
-rather than a truncated value in the result. `uint32` needs `bigint` for the
-same reason, and a length-limited `varchar(n)` is refused because enforcing the
-limit would mean truncating.
+Widening is allowed only where it cannot lose anything, and a declaration that
+would cost information is refused at the start of the scan rather than turned
+into a wrong value. Four rules follow from that:
+
+- **No narrowing.** `int32` into `bigint` yes, `int64` into `integer` no;
+  `uint32` needs `bigint` for the same reason, `float64` does not fit `real`,
+  and a length-limited `varchar(n)` is refused because enforcing the limit
+  would mean truncating. A list gets these rules on its element, so
+  `list<int64>` is `bigint[]` and not `integer[]`.
+- **No loss of precision.** A `timestamp` column has to be able to hold
+  microseconds, so `timestamp(6)` and a bare `timestamp` are accepted and
+  `timestamp(3)` is not. A `decimal128(p,s)` needs a `numeric(P,S)` with
+  `S >= s` and `P - S >= p - s`, or a plain `numeric`, which constrains
+  nothing.
+- **No crossing between the two timestamp types.** A zone on the Arrow type
+  means `timestamptz` and no zone means `timestamp`; reading either as the
+  other would reinterpret the instant, so both crossings are errors.
+- **No rounding of nanoseconds.** PostgreSQL keeps microseconds, so a
+  nanosecond value that is not a whole microsecond is an error on that value
+  rather than a rounded result. A value outside PostgreSQL's date or timestamp
+  range is an error for the same reason.
 
 Everything else is B-tier: `uint64`, `struct`, `map`, `dictionary`,
 `duration` and the interval types, `time32`/`time64`, `date64`, `decimal256`,
@@ -285,6 +296,8 @@ The suites, in the order they run:
 | `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
 | `creds` | the user mapping secret is in no plan; the gate then greps the server logs for it |
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
+| `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
+| `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
 
 After the suites, the gate greps the coordinator and segment logs for the fake
 secret the `creds` suite puts in a user mapping. The only line allowed to
@@ -298,8 +311,11 @@ The gate needs `test/gate/env.sh` (not in the repository) to export
 
 ## Known limits
 
-- Eight of the A-tier Arrow families are readable; the other six are named in
-  the type table above and refused rather than guessed at.
+- The A-tier list in the type table above is complete; everything outside it is
+  refused rather than guessed at.
+- The refusal of a nanosecond timestamp that is not a whole microsecond is
+  implemented but untested: every timestamp in `test/fixtures` is
+  microsecond-aligned, and the fixtures are not this package's to change.
 - No filter, limit or vector-search pushdown; every qualifier is evaluated by
   PostgreSQL.
 - Rows are decoded one at a time into `Datum`s. Arrow batches are not handed to

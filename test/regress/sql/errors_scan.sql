@@ -84,7 +84,7 @@ SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_double_real$$) A
 CREATE FOREIGN TABLE lance_regress.errs_varchar (c_utf8 varchar(4))
   SERVER errs_files OPTIONS (uri 'types_all.lance');
 SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_varchar$$) AS utf8_into_varchar4;
--- An A-tier type this build has no converter for yet.
+-- A list-shaped type read into something that is not an array of its element.
 CREATE FOREIGN TABLE lance_regress.errs_fsl (c_fsl_f32_4 text)
   SERVER errs_files OPTIONS (uri 'types_all.lance');
 SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_fsl$$) AS fsl_into_text;

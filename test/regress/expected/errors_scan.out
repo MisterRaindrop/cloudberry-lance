@@ -117,12 +117,12 @@ SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_varchar$$) AS ut
 utf8_into_varchar4
 lance_fdw: column "c_utf8": Lance type "u" (string) cannot be read as character varying(4)
 (1 row)
--- An A-tier type this build has no converter for yet.
+-- A list-shaped type read into something that is not an array of its element.
 CREATE FOREIGN TABLE lance_regress.errs_fsl (c_fsl_f32_4 text)
   SERVER errs_files OPTIONS (uri 'types_all.lance');
 SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_fsl$$) AS fsl_into_text;
 fsl_into_text
-lance_fdw: column "c_fsl_f32_4": Lance type "+w:4" (fixed_size_list) is not supported in this build and cannot be read as text
+lance_fdw: column "c_fsl_f32_4": Lance type "+w:4" (fixed_size_list) cannot be read as text
 (1 row)
 -- A B-tier type, which no declaration makes readable (I8).
 CREATE FOREIGN TABLE lance_regress.errs_struct (c_struct text)

@@ -31,10 +31,15 @@ OBJS = \
 	src/lance_option.o \
 	src/lance_runtime.o \
 	src/lance_arrow.o \
+	src/lance_dispatch.o \
+	src/lance_scan.o \
 	src/lance_import.o \
 	vendor/nanoarrow/src/nanoarrow.o
 
-REGRESS = install ddl import errors_ddl
+# "install" first: it creates the extension and the lance_regress schema every
+# other suite builds on.  test/gate/gate.sh keeps the same list.
+REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
+	creds errors_scan
 REGRESS_OPTS = --inputdir=test/regress --outputdir=test/regress
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,10 @@
 #include "lance_arrow.h"
 
 #include "catalog/pg_type_d.h"
+#include "varatt.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 
 #define LANCE_BLOB_METADATA_KEY "lance-encoding"
 #define LANCE_BLOB_METADATA_VALUE "blob"
@@ -274,4 +277,326 @@ lance_arrow_map_type(const struct ArrowSchema *field, Oid *typid,
 
 	*is_b_tier = false;
 	return true;
+}
+
+/*-------------------------------------------------------------------------
+ * Value converters (DESIGN D7, D8)
+ *
+ * Every accessor below goes through nanoarrow's array view rather than through
+ * offset arithmetic of our own: array->offset is routinely non-zero once a
+ * fragment has a deletion file, large_utf8 counts its offsets in 64 bits, and
+ * a validity bitmap is allowed to be absent.  Those are the four places a
+ * hand-written decoder gets wrong.
+ *-------------------------------------------------------------------------
+ */
+
+/*
+ * A value bigger than a varlena can describe is an error, not a truncation
+ * (I7).  Lance itself has no such limit, so this is reachable with a large
+ * enough blob.
+ */
+static void
+lance_check_varlena_size(LanceConverter *conv, int64 size)
+{
+	if (size < 0 || (uint64) size > (uint64) (MaxAllocSize - VARHDRSZ))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("lance_fdw: column \"%s\": value of " INT64_FORMAT " bytes is too large for %s",
+						conv->colname, size,
+						format_type_with_typemod(conv->pgtypid, conv->pgtypmod))));
+}
+
+static Datum
+lance_conv_bool(LanceConverter *conv, int64 row)
+{
+	return BoolGetDatum(ArrowArrayViewGetIntUnsafe(&conv->view, row) != 0);
+}
+
+/*
+ * The three integer converters share one accessor: nanoarrow widens any Arrow
+ * integer storage to int64, and the dispatch table only pairs an Arrow type
+ * with a PostgreSQL type that holds every one of its values, so the narrowing
+ * cast here cannot lose anything.
+ */
+static Datum
+lance_conv_int2(LanceConverter *conv, int64 row)
+{
+	return Int16GetDatum((int16) ArrowArrayViewGetIntUnsafe(&conv->view, row));
+}
+
+static Datum
+lance_conv_int4(LanceConverter *conv, int64 row)
+{
+	return Int32GetDatum((int32) ArrowArrayViewGetIntUnsafe(&conv->view, row));
+}
+
+static Datum
+lance_conv_int8(LanceConverter *conv, int64 row)
+{
+	return Int64GetDatum(ArrowArrayViewGetIntUnsafe(&conv->view, row));
+}
+
+/*
+ * float32 reaches this as a double that is exactly the float32 value, so the
+ * cast back is lossless and NaN, the infinities and negative zero all survive.
+ */
+static Datum
+lance_conv_float4(LanceConverter *conv, int64 row)
+{
+	return Float4GetDatum((float4) ArrowArrayViewGetDoubleUnsafe(&conv->view, row));
+}
+
+static Datum
+lance_conv_float8(LanceConverter *conv, int64 row)
+{
+	return Float8GetDatum(ArrowArrayViewGetDoubleUnsafe(&conv->view, row));
+}
+
+static Datum
+lance_conv_text(LanceConverter *conv, int64 row)
+{
+	struct ArrowStringView sv = ArrowArrayViewGetStringUnsafe(&conv->view, row);
+
+	lance_check_varlena_size(conv, sv.size_bytes);
+
+	/* A column of nothing but empty strings has no data buffer at all. */
+	if (sv.size_bytes == 0)
+		return PointerGetDatum(cstring_to_text_with_len("", 0));
+
+	return PointerGetDatum(cstring_to_text_with_len(sv.data,
+													(int) sv.size_bytes));
+}
+
+static Datum
+lance_conv_bytea(LanceConverter *conv, int64 row)
+{
+	struct ArrowBufferView bv = ArrowArrayViewGetBytesUnsafe(&conv->view, row);
+	bytea	   *result;
+
+	lance_check_varlena_size(conv, bv.size_bytes);
+
+	result = (bytea *) palloc(VARHDRSZ + bv.size_bytes);
+	SET_VARSIZE(result, VARHDRSZ + bv.size_bytes);
+	if (bv.size_bytes > 0)
+		memcpy(VARDATA(result), bv.data.as_uint8, (size_t) bv.size_bytes);
+
+	return PointerGetDatum(result);
+}
+
+/*
+ * The dispatch table.  A row means "this Arrow type may be read into this
+ * PostgreSQL type"; the absence of a row is what makes int64 into integer, or
+ * utf8 into integer, an error at BeginForeignScan instead of a wrong value
+ * later.  Widening within a family is present, narrowing never is.
+ *
+ * Adding a type is adding rows here plus the function they name.  Nothing else
+ * in the scan path knows about types.
+ */
+typedef struct LanceConverterRule
+{
+	enum ArrowType arrow_type;
+	Oid			pgtypid;
+	LanceConvertFn convert;
+} LanceConverterRule;
+
+static const LanceConverterRule lance_converter_rules[] = {
+	{NANOARROW_TYPE_BOOL, BOOLOID, lance_conv_bool},
+
+	{NANOARROW_TYPE_INT8, INT2OID, lance_conv_int2},
+	{NANOARROW_TYPE_INT8, INT4OID, lance_conv_int4},
+	{NANOARROW_TYPE_INT8, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_INT16, INT2OID, lance_conv_int2},
+	{NANOARROW_TYPE_INT16, INT4OID, lance_conv_int4},
+	{NANOARROW_TYPE_INT16, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_INT32, INT4OID, lance_conv_int4},
+	{NANOARROW_TYPE_INT32, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_INT64, INT8OID, lance_conv_int8},
+
+	/* uint8 fits in smallint, uint16 in integer, uint32 in bigint */
+	{NANOARROW_TYPE_UINT8, INT2OID, lance_conv_int2},
+	{NANOARROW_TYPE_UINT8, INT4OID, lance_conv_int4},
+	{NANOARROW_TYPE_UINT8, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_UINT16, INT4OID, lance_conv_int4},
+	{NANOARROW_TYPE_UINT16, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_UINT32, INT8OID, lance_conv_int8},
+
+	{NANOARROW_TYPE_FLOAT, FLOAT4OID, lance_conv_float4},
+	{NANOARROW_TYPE_FLOAT, FLOAT8OID, lance_conv_float8},
+
+	{NANOARROW_TYPE_DOUBLE, FLOAT8OID, lance_conv_float8},
+
+	{NANOARROW_TYPE_STRING, TEXTOID, lance_conv_text},
+	{NANOARROW_TYPE_STRING, VARCHAROID, lance_conv_text},
+	{NANOARROW_TYPE_LARGE_STRING, TEXTOID, lance_conv_text},
+	{NANOARROW_TYPE_LARGE_STRING, VARCHAROID, lance_conv_text},
+
+	{NANOARROW_TYPE_BINARY, BYTEAOID, lance_conv_bytea},
+	{NANOARROW_TYPE_LARGE_BINARY, BYTEAOID, lance_conv_bytea},
+
+	{NANOARROW_TYPE_UNINITIALIZED, InvalidOid, NULL}
+};
+
+static LanceConvertFn
+lance_converter_lookup(enum ArrowType arrow_type, Oid pgtypid)
+{
+	const LanceConverterRule *rule;
+
+	for (rule = lance_converter_rules; rule->convert != NULL; rule++)
+	{
+		if (rule->arrow_type == arrow_type && rule->pgtypid == pgtypid)
+			return rule->convert;
+	}
+	return NULL;
+}
+
+/*
+ * Does this build know how to read the Arrow type at all?  An A-tier type with
+ * no rule anywhere is one this build has not implemented yet, which is a
+ * different message from one that simply does not fit the declared column.
+ */
+static bool
+lance_converter_type_known(enum ArrowType arrow_type)
+{
+	const LanceConverterRule *rule;
+
+	for (rule = lance_converter_rules; rule->convert != NULL; rule++)
+	{
+		if (rule->arrow_type == arrow_type)
+			return true;
+	}
+	return false;
+}
+
+static const char *
+lance_arrow_name_or(const struct ArrowSchema *field, const char *fallback)
+{
+	const char *name = lance_arrow_type_name(field);
+
+	return name != NULL ? name : fallback;
+}
+
+void
+lance_arrow_resolve_converter(const struct ArrowSchema *field, Oid pgtypid,
+							  int32 pgtypmod, LanceConverter *out)
+{
+	struct ArrowSchemaView view;
+	struct ArrowError error;
+	Oid			natural_typid;
+	int32		natural_typmod;
+	bool		is_b_tier;
+	const char *colname;
+
+	memset(out, 0, sizeof(*out));
+
+	colname = (field != NULL && field->name != NULL) ? field->name : "?";
+	out->colname = pstrdup(colname);
+	out->pgtypid = pgtypid;
+	out->pgtypmod = pgtypmod;
+
+	/*
+	 * The tier decision comes first and is independent of what the table
+	 * declares: a B-tier column is unreadable whatever the user wrote (I8).
+	 */
+	if (!lance_arrow_map_type(field, &natural_typid, &natural_typmod,
+							  &is_b_tier))
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported and cannot be read as %s",
+						colname, lance_arrow_format(field),
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
+				 errhint("Drop the column from the foreign table, or read it "
+						 "with a tool that understands the type.")));
+
+	memset(&error, 0, sizeof(error));
+	if (ArrowSchemaViewInit(&view, field, &error) != NANOARROW_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: cannot parse Arrow type \"%s\" of column \"%s\"",
+						lance_arrow_format(field), colname),
+				 errdetail("%s", error.message)));
+
+	out->arrow_type = view.type;
+	out->decimal_precision = view.decimal_precision;
+	out->decimal_scale = view.decimal_scale;
+	out->fixed_size = view.fixed_size;
+
+	out->convert = lance_converter_lookup(view.type, pgtypid);
+
+	if (out->convert == NULL && !lance_converter_type_known(view.type))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported in this build and cannot be read as %s",
+						colname, lance_arrow_format(field),
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
+				 errdetail("This Arrow type maps to %s, but no converter for it "
+						   "is compiled in yet.",
+						   format_type_with_typemod(natural_typid,
+													natural_typmod))));
+
+	if (out->convert == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) cannot be read as %s",
+						colname, lance_arrow_format(field),
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
+				 errhint("Declare the column %s.",
+						 format_type_with_typemod(natural_typid,
+												  natural_typmod))));
+
+	/*
+	 * A length-limited character type would need the length enforced on every
+	 * value, and silently keeping a longer one is exactly what I7 forbids.
+	 */
+	if ((pgtypid == VARCHAROID || pgtypid == BPCHAROID) && pgtypmod >= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) cannot be read as %s",
+						colname, lance_arrow_format(field),
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
+				 errdetail("A length limit would have to truncate values."),
+				 errhint("Declare the column text.")));
+
+	memset(&error, 0, sizeof(error));
+	if (ArrowArrayViewInitFromSchema(&out->view, field, &error) != NANOARROW_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: cannot read column \"%s\" of Arrow type \"%s\"",
+						colname, lance_arrow_format(field)),
+				 errdetail("%s", error.message)));
+}
+
+void
+lance_arrow_converter_set_array(LanceConverter *conv,
+								const struct ArrowArray *array)
+{
+	struct ArrowError error;
+
+	memset(&error, 0, sizeof(error));
+	if (ArrowArrayViewSetArray(&conv->view, array, &error) != NANOARROW_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+				 errmsg("lance_fdw: column \"%s\": Lance returned a batch this build cannot read",
+						conv->colname),
+				 errdetail("%s", error.message)));
+}
+
+void
+lance_arrow_converter_reset(LanceConverter *conv)
+{
+	/*
+	 * Nothing outside palloc is held for the scalar types this build reads -
+	 * ArrowArrayViewInitFromSchema only allocates for nested ones - but the
+	 * call is the contract, and a nested converter added later must not have to
+	 * change the scan.
+	 */
+	ArrowArrayViewReset(&conv->view);
 }

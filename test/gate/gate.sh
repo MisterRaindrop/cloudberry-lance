@@ -16,6 +16,7 @@
 #   test/gate/gate.sh --clean         make clean + cargo clean first (slow)
 #   test/gate/gate.sh --no-sync       reuse whatever is already in the container
 #   test/gate/gate.sh --no-fixtures   skip fixture generation/sync/upload
+#   test/gate/gate.sh --stress        afterwards, dry-run test/stress/*.sh
 #
 # Environment:
 #   LANCE_GATE_CONTAINER   container name             (default cbdb-repro-1850)
@@ -55,6 +56,7 @@ CLUSTER_LOGS=(
 DO_CLEAN=no
 DO_SYNC=yes
 DO_FIXTURES=yes
+DO_STRESS=no
 SUITE=
 
 # The 21 lance crates lance-c takes from git.  The container cannot fetch them
@@ -88,7 +90,7 @@ die() { echo "gate: $*" >&2; exit 1; }
 say() { echo "gate: $*"; }
 
 usage() {
-	sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -e '1d' -e '/^[^#]/,$d' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -96,6 +98,7 @@ while [ $# -gt 0 ]; do
 		--clean) DO_CLEAN=yes ;;
 		--no-sync) DO_SYNC=no ;;
 		--no-fixtures) DO_FIXTURES=no ;;
+		--stress) DO_STRESS=yes ;;
 		--suite)
 			[ $# -ge 2 ] || die "--suite needs a suite name"
 			SUITE=$2
@@ -376,11 +379,44 @@ echo 'credential check: the secret appears only in the CREATE USER MAPPING state
 "
 }
 
-say "container=$CONTAINER remote=$REMOTE suites='$SUITES'"
+# ---------------------------------------------------------------------------
+# --stress: prove the stress scripts run, not that the invariants hold
+#
+# The full runs are minutes to hours and their subject is behaviour under
+# repetition, so they are not part of a gate: WORKPLAN T7 has the main session
+# run them by hand and record the numbers.  What a gate can do is catch a stress
+# script that no longer works, which is what these dry runs are.  cancel_loop
+# gets --min-interrupted-pct 0 for that reason: on a 1 MiB dataset a scan can
+# finish before the interrupt reaches it, which says nothing about the wrapper
+# and everything about the size of the fixture.
+# ---------------------------------------------------------------------------
+run_stress() {
+	[ "$DO_STRESS" = yes ] || return 0
+
+	local common=(
+		"LANCE_GATE_CONTAINER=$CONTAINER"
+		"LANCE_GATE_REMOTE=$REMOTE"
+		"LANCE_GATE_PORT=$QD_PORT"
+		"LANCE_GATE_PG_ENV=$PG_ENV"
+	)
+
+	say "dry-running test/stress/cancel_loop.sh"
+	env "${common[@]}" bash "$ROOT/test/stress/cancel_loop.sh" \
+		--rounds 2 --dataset large_text --min-interrupted-pct 0
+
+	say "dry-running test/stress/leak_loop.sh"
+	env "${common[@]}" bash "$ROOT/test/stress/leak_loop.sh" --rounds 20
+
+	say "dry-running test/stress/noregress.sh"
+	env "${common[@]}" bash "$ROOT/test/stress/noregress.sh"
+}
+
+say "container=$CONTAINER remote=$REMOTE suites='$SUITES' stress=$DO_STRESS"
 prepare_fixtures
 sync_tree
 sync_fixtures
 ensure_cargo_inputs
 build_and_test
 check_credential_leak
+run_stress
 say "PASS"

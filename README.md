@@ -33,11 +33,17 @@ Prerequisites, in addition to a Cloudberry installation and its `pg_config`:
 Then:
 
 ```sh
-git submodule update --init            # third_party/lance-c, pinned to v0.1.9
+source /usr/local/cloudberry-db/greenplum_path.sh   # puts pg_config on PATH
+git submodule update --init                         # third_party/lance-c, at v0.1.9
 make
 make install
 psql -c 'CREATE EXTENSION lance_fdw'
 ```
+
+A Cloudberry installation does not put `pg_config` on anyone's `PATH` — not even
+in the login shell of the user that runs the cluster — so either source the
+environment file the server ships, as above, or build with
+`make PG_CONFIG=/usr/local/cloudberry-db/bin/pg_config`.
 
 `make` builds `third_party/lance-c` with cargo (about 16 minutes on 16 cores
 from cold, seconds afterwards) and links `lance_fdw.so` against it. `make
@@ -62,7 +68,7 @@ Other targets:
 | Target | What it does |
 |---|---|
 | `make check-syntax` | `gcc -fsyntax-only` over `src/*.c`; needs no server installation, only a configured source tree in `PG_INCLUDE_DIR` (default `/opt/cloudberry/src/include`) |
-| `make check-scripts` | `bash -n` over the gate scripts |
+| `make check-scripts` | `bash -n` over `test/gate/*.sh` and `test/stress/*.sh` |
 | `make installcheck` | the pg_regress suites; see "Testing" |
 | `make clean-lance-c` | `cargo clean` in the submodule; deliberately not part of `make clean` |
 
@@ -148,7 +154,7 @@ and works even against a server whose credentials are wrong.
 
 | Option | Meaning |
 |---|---|
-| `mpp_execute` | `all segments` (the default the extension installs), `coordinator` or `any`. Under `all segments` the coordinator enumerates fragments and each segment reads its own share; the other two make one process read everything. |
+| `mpp_execute` | `all segments` (the default the extension installs), `coordinator` or `any`; `master` is accepted as an older spelling of `coordinator`. Under `all segments` the coordinator enumerates fragments and each segment reads its own share; the other two make one process read everything. |
 
 **Server**
 
@@ -197,13 +203,36 @@ are never put into a plan, an `EXPLAIN`, or a log line.
 | `lance_fdw.index_cache_size_mb` | 64 | Per-backend Lance index cache. lance's own default is 6 GiB, which is far too much for one cache per backend. |
 | `lance_fdw.metadata_cache_size_mb` | 32 | Per-backend Lance metadata cache. lance's own default is 1 GiB. |
 
-All four are read once per backend, before its first call into lance-c, so
-changing them mid-session has no effect on that session.
+All four are `SUSET` and are read once per backend, before its first call into
+lance-c, so changing them mid-session has no effect on that session.
 
-A backend that opens a dataset grows to roughly 18 threads and about 34 once it
-scans, independent of how many datasets it opens. On a coordinator with many
-concurrent sessions, that is the number to plan around: lower `cpu_threads` and
-`io_threads` if it matters more than per-query throughput.
+### Deploying
+
+**Threads.** A backend that opens a dataset grows to roughly 18 threads, and to
+about 34 once it scans — measured on 16 cores. The count follows the core count
+rather than the number of datasets, and it then stays put. One query on a
+three-segment cluster pays it four times over: the coordinator opens the dataset
+to list its fragments, and each of the three segments scans. With many
+concurrent sessions this is the first thing to run out of, so set
+`lance_fdw.cpu_threads` and `lance_fdw.io_threads` to something small (2 and 4,
+say) if concurrency matters more to you than the throughput of one query.
+
+**Caches.** `index_cache_size_mb` and `metadata_cache_size_mb` are per-backend
+ceilings, not reservations: a backend grows into them as it reads manifests, and
+100 sessions can hold 100 of them. That is why the defaults are 64 and 32 MiB
+against lance's own 6 GiB and 1 GiB — one cache per backend is a different
+proposition from one cache per process. This block never asks Lance for an
+index, so the index cache has almost nothing to hold yet; the GUC is there for
+when it does.
+
+**Batches.** `batch_size` is in rows, and lance-c exposes no byte budget, so a
+dataset with MiB-sized `binary` or `large_binary` values needs the row count
+lowered by hand: the default of 8192 rows times a 1 MiB value is 8 GiB in
+flight. A few dozen rows is a reasonable starting point for blob-like columns.
+
+**Row estimates.** Planning does no I/O, so the planner starts from 100000 rows
+for every Lance table. Where that is wrong enough to pick the wrong join order,
+set `rows_hint` on the table.
 
 ### Types
 
@@ -307,15 +336,61 @@ verbatim like any other DDL.
 The gate needs `test/gate/env.sh` (not in the repository) to export
 `LANCE_S3_ENDPOINT_HOST`, `LANCE_S3_ENDPOINT_CONTAINER`, `LANCE_S3_BUCKET`,
 `LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET` for the MinIO the
-`s3://` cases use.
+`s3://` cases use. It also expects a container that can run `make installcheck`
+at all, which is more than a bare Cloudberry installation provides —
+`docs/testing.md` lists what has to be there and where it comes from.
+
+### Stress and control scripts
+
+`test/stress/` holds three scripts that are not part of the gate, because what
+they are about is behaviour under repetition and comparison rather than the
+result of one query. Each one is a host-side driver that streams its body into
+the container, the same bridge `gate.sh` uses.
+
+| Script | What it asserts |
+|---|---|
+| `cancel_loop.sh` | An S3 scan interrupted round after round, half by `statement_timeout` and half by `pg_cancel_backend()`, comes back every time inside a deadline; the session then still works, both `mpp_execute` modes agree on the row count, every thread of that backend blocks the signals a backend is driven by, nothing dumped core and the cluster is whole. Prints the interrupt-to-error distribution. |
+| `leak_loop.sh` | A thousand rounds of three failing scans in one session leave the backend's descriptor count and resident memory where they started. Prints the whole curve, plus thread and QE-process counts as observations. |
+| `noregress.sh` | A fixed SQL script with no Lance in it — distributed tables, a cross-segment join, an external web table through `gp_exttable_fdw`, an `EXPLAIN` — produces byte-identical output with the extension absent, installed, and installed after a scan. |
+
+```sh
+bash test/stress/cancel_loop.sh --rounds 50 --dataset big
+bash test/stress/leak_loop.sh --rounds 1000
+bash test/stress/noregress.sh
+bash test/gate/gate.sh --stress          # after the suites, dry-run all three
+```
+
+`--help` on any of them lists its options. The `big` fixture the cancellation
+loop wants by default is about 1.5 GB and is not generated unless asked for:
+
+```sh
+make -C test/fixtures gen GEN_FLAGS=--with-big
+make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
+```
+
+`--dataset large_text` runs the same loop against a 1 MiB dataset instead, which
+exercises the script rather than the wrapper: a scan that small can finish
+before the interrupt reaches it. `gate.sh --stress` uses exactly that, with two
+rounds, twenty leak rounds and one `noregress` pass, so that a gate catches a
+stress script that has stopped working without pretending to have proved the
+invariant. `docs/testing.md` has the rest, including what the numbers mean.
 
 ## Known limits
 
 - The A-tier list in the type table above is complete; everything outside it is
   refused rather than guessed at.
+- Lance's own blob encoding (a field with `lance-encoding: blob` metadata) is
+  B-tier whatever its Arrow type says, because lance-c v0.1.9 returns a
+  `struct{position, size}` descriptor for such a column and offers no API to
+  read the bytes behind it.
 - The refusal of a nanosecond timestamp that is not a whole microsecond is
   implemented but untested: every timestamp in `test/fixtures` is
   microsecond-aligned, and the fixtures are not this package's to change.
+- `IMPORT FOREIGN SCHEMA` requires `LIMIT TO`. Nothing in lance-c lists the
+  datasets under a uri, so the names have to come from you.
+- Snapshots are statement-level, not transaction-level: two statements in one
+  transaction can read two versions of a dataset that is being appended to,
+  unless the table names a `version`.
 - No filter, limit or vector-search pushdown; every qualifier is evaluated by
   PostgreSQL.
 - Rows are decoded one at a time into `Datum`s. Arrow batches are not handed to
@@ -324,10 +399,15 @@ The gate needs `test/gate/env.sh` (not in the repository) to export
   row count, so a dataset whose fragments differ wildly in size will skew.
 - Cancellation takes effect at a batch boundary, so a single slow read from an
   object store delays it by however long that read takes.
+- Storage errors can take seconds to arrive: the object store retries a refused
+  connection with backoff, so an endpoint nothing listens on takes about ten
+  seconds to fail rather than failing at once.
 - Only the PostgreSQL planner is covered. The test cluster is built
   `--disable-orca`, so the ORCA path is unverified.
-- A panic inside lance-c is reported as an error where lance-c can catch it,
-  but a double panic or a stack overflow still takes the backend down.
+- lance-c is compiled with `panic = "abort"`. An error it catches becomes a
+  `lance:` error like any other, but a panic that reaches the runtime takes the
+  whole backend down with it — and that path is unverified, because we could not
+  construct one.
 
 ## Licence
 

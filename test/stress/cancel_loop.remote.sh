@@ -187,6 +187,7 @@ round() {
 		timeout|cancel)
 			INTERRUPTED=$(( INTERRUPTED + 1 ))
 			echo "$latency" >>"$SESS_DIR/lat"
+			echo "$latency" >>"$SESS_DIR/lat.$mode"
 			printf '  round %3d %-7s interrupted (%s) after %6d ms\n' \
 				"$n" "$mode" "$class" "$latency"
 			;;
@@ -214,6 +215,8 @@ say "before: $STATE"
 setup
 session_open "$DB"
 : >"$SESS_DIR/lat"
+: >"$SESS_DIR/lat.timeout"
+: >"$SESS_DIR/lat.cancel"
 
 calibrate
 
@@ -285,7 +288,12 @@ fi
 
 say "rounds run $ROUNDS_RUN of $ROUNDS: interrupted $INTERRUPTED, finished first $COMPLETED"
 [ -z "$CAL_NOTE" ] || say "calibration: $CAL_NOTE, interrupt after ${DELAY_MS} ms"
+# Two different measurements, so also reported apart: for a timeout round the
+# clock starts when the timeout was due, for a cancel round where
+# pg_cancel_backend() returned.
 say "interrupt to error, in ms: $(distribution <"$SESS_DIR/lat")"
+say "  statement_timeout, overshoot: $(distribution <"$SESS_DIR/lat.timeout")"
+say "  pg_cancel_backend, latency:   $(distribution <"$SESS_DIR/lat.cancel")"
 
 if [ "$FAILURES" != 0 ]; then
 	say "FAIL ($FAILURES problems)"

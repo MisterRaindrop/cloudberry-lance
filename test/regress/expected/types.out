@@ -51,7 +51,7 @@ id|c_bool|c_int8|c_int16|c_int32|c_int64|c_uint8|c_uint16|c_uint32
 22|t||32767|2147483647|2147483648|1|1|1
 23|f|-128|-32768||-2147483649|128|32768|2147483648
 (24 rows)
--- float16 is decoded to the value its 16 bits denote; 6.103516e-05 is 2^-14
+-- float16 is decoded to the value its 16 bits denote; 6.1035156e-05 is 2^-14
 -- and 65504 is the largest half float.
 SELECT id, c_float16, c_float32, c_float64 FROM lance_regress.ty_all ORDER BY id;
 id|c_float16|c_float32|c_float64
@@ -59,22 +59,22 @@ id|c_float16|c_float32|c_float64
 1||-0|1.7976931348623157e+308
 2|-2.25|3.4028235e+38|
 3|65504|NaN|-Infinity
-4|6.103516e-05|Infinity|0.1
+4|6.1035156e-05|Infinity|0.1
 5|0||0
 6|1.5|0|1.7976931348623157e+308
 7|-2.25|-0|2.2250738585072014e-308
 8||3.4028235e+38|-Infinity
-9|6.103516e-05|NaN|
+9|6.1035156e-05|NaN|
 10|0|Infinity|0
 11|1.5|-1.5|1.7976931348623157e+308
 12|-2.25||2.2250738585072014e-308
 13|65504|-0|-Infinity
-14|6.103516e-05|3.4028235e+38|0.1
+14|6.1035156e-05|3.4028235e+38|0.1
 15||NaN|0
 16|1.5|Infinity|
 17|-2.25|-1.5|2.2250738585072014e-308
 18|65504|0|-Infinity
-19|6.103516e-05||0.1
+19|6.1035156e-05||0.1
 20|0|3.4028235e+38|0
 21|1.5|NaN|1.7976931348623157e+308
 22||Infinity|2.2250738585072014e-308

@@ -25,7 +25,7 @@ IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("types_all.lance")
 ALTER FOREIGN TABLE lance_regress."types_all.lance" RENAME TO ty_all;
 SELECT id, c_bool, c_int8, c_int16, c_int32, c_int64, c_uint8, c_uint16, c_uint32
   FROM lance_regress.ty_all ORDER BY id;
--- float16 is decoded to the value its 16 bits denote; 6.103516e-05 is 2^-14
+-- float16 is decoded to the value its 16 bits denote; 6.1035156e-05 is 2^-14
 -- and 65504 is the largest half float.
 SELECT id, c_float16, c_float32, c_float64 FROM lance_regress.ty_all ORDER BY id;
 SELECT id, to_json(c_utf8) AS utf8, to_json(c_large_utf8) AS large_utf8

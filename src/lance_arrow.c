@@ -923,6 +923,13 @@ lance_resolve_list(const struct ArrowSchema *field,
 	element->pgtypmod = pgtypmod;
 	lance_converter_set_arrow_state(element, &childview);
 
+	/*
+	 * Hang the element off *out before its view is initialised: from here on
+	 * the scan's cleanup can reach it, so an error below gives back whatever
+	 * the half-built view had allocated (I6).
+	 */
+	out->element = element;
+
 	memset(&error, 0, sizeof(error));
 	if (ArrowArrayViewInitFromSchema(&element->view, child, &error) != NANOARROW_OK)
 		ereport(ERROR,
@@ -931,7 +938,6 @@ lance_resolve_list(const struct ArrowSchema *field,
 						out->colname, lance_arrow_format(field)),
 				 errdetail("%s", error.message)));
 
-	out->element = element;
 	out->elemtypid = elemtypid;
 	get_typlenbyvalalign(elemtypid, &out->elemlen, &out->elembyval,
 						 &out->elemalign);

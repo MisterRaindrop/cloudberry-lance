@@ -44,8 +44,8 @@ cleanup() {
 trap cleanup EXIT
 
 missing_dataset() {
-	say "could not open s3://$S3_BUCKET/fixtures/$TABLE"
-	say "generate the fixture and upload it, on the host:"
+	say "could not open s3://$S3_BUCKET/fixtures/$TABLE - the error above says why"
+	say "if it was never uploaded, generate it and upload it on the host:"
 	if [ "$DATASET" = big ]; then
 		say "    make -C test/fixtures gen GEN_FLAGS=--with-big"
 	else

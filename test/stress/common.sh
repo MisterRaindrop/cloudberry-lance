@@ -37,13 +37,17 @@ SEG_PORTS=${LANCE_STRESS_SEG_PORTS:-"7002 7003 7004"}
 FIXTURE_DIR=${LANCE_STRESS_FIXTURE_DIR:-$REMOTE/test/fixtures/data}
 
 # A core file lands either in the data directory of the process that dumped it
-# or, for anything started from gpadmin's home, in the home directory.
-CORE_DIRS=${LANCE_STRESS_CORE_DIRS:-"\
-/home/gpadmin/demo/datadirs/qddir/demoDataDir-1 \
-/home/gpadmin/demo/datadirs/dbfast1/demoDataDir0 \
-/home/gpadmin/demo/datadirs/dbfast2/demoDataDir1 \
-/home/gpadmin/demo/datadirs/dbfast3/demoDataDir2 \
-/home/gpadmin"}
+# or, for anything started from gpadmin's home, in the home directory.  A
+# space-separated list, one directory each for the coordinator and the three
+# segments of the demo cluster.
+CORE_DIRS=${LANCE_STRESS_CORE_DIRS:-}
+if [ -z "$CORE_DIRS" ]; then
+	CORE_DIRS="/home/gpadmin/demo/datadirs/qddir/demoDataDir-1"
+	CORE_DIRS="$CORE_DIRS /home/gpadmin/demo/datadirs/dbfast1/demoDataDir0"
+	CORE_DIRS="$CORE_DIRS /home/gpadmin/demo/datadirs/dbfast2/demoDataDir1"
+	CORE_DIRS="$CORE_DIRS /home/gpadmin/demo/datadirs/dbfast3/demoDataDir2"
+	CORE_DIRS="$CORE_DIRS /home/gpadmin"
+fi
 
 TAG=${TAG:-stress}
 

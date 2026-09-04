@@ -321,7 +321,7 @@ The suites, in the order they run:
 | `errors_ddl` | bad path, bucket, credentials and endpoint, seen from `IMPORT` |
 | `scan_core` | values against the pylance reference output, deletions, empty and gapped fragment lists, schema evolution, `batch_size`, `count(*)`, joins both ways, `file://` and `s3://` |
 | `parallel` | the split is complete and disjoint for 1, 2, 3, 7 and 100 fragments; `coordinator` and `any` agree with `all segments` |
-| `snapshot` | version pinning, in both the rows and the fragment count |
+| `snapshot` | version pinning, in both the rows and the fragment count, including a version whose successor deleted rows from existing fragments — the case an append-only history cannot tell apart on the segments |
 | `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
 | `creds` | the user mapping secret is in no plan; the gate then greps the server logs for it |
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |

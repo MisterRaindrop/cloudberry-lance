@@ -85,6 +85,29 @@ lance_dispatch_make_units(const char *uri, uint64 version,
 	return unit;
 }
 
+/*
+ * Give back a unit list this function put in the plan on an earlier execution.
+ * Only this file ever writes that slot, so everything in it is ours to free.
+ */
+static void
+lance_dispatch_free_units(List *units)
+{
+	ListCell   *lc;
+
+	foreach(lc, units)
+	{
+		String	   *value = (String *) lfirst(lc);
+
+		if (value == NULL || !IsA(value, String))
+			continue;
+		if (value->sval != NULL)
+			pfree(value->sval);
+		pfree(value);
+	}
+
+	list_free(units);
+}
+
 void
 lance_dispatch_publish(ForeignScan *fsplan, const char *uri, uint64 version,
 					   const uint64 *ids, int nids)
@@ -103,8 +126,18 @@ lance_dispatch_publish(ForeignScan *fsplan, const char *uri, uint64 version,
 	units = lance_dispatch_make_units(uri, version, ids, nids);
 
 	if (list_length(fsplan->fdw_private) > LANCE_FDW_PRIVATE_UNITS)
+	{
+		/*
+		 * A cached plan reaches this a second time.  Freeing what the previous
+		 * execution left is what keeps a prepared statement in a loop from
+		 * growing the plan's memory context one uri and one fragment list at a
+		 * time.
+		 */
+		lance_dispatch_free_units((List *) list_nth(fsplan->fdw_private,
+													LANCE_FDW_PRIVATE_UNITS));
 		fsplan->fdw_private = list_truncate(fsplan->fdw_private,
 											LANCE_FDW_PRIVATE_UNITS);
+	}
 
 	fsplan->fdw_private = lappend(fsplan->fdw_private, units);
 

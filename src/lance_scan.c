@@ -115,12 +115,21 @@ lance_scan_cleanup(void *arg)
 static void
 lance_scan_read_projection(LanceScanState *state, ForeignScan *fsplan)
 {
-	List	   *attrs = (List *) list_nth(fsplan->fdw_private,
-										  LANCE_FDW_PRIVATE_ATTRS);
-	List	   *names = (List *) list_nth(fsplan->fdw_private,
-										  LANCE_FDW_PRIVATE_COLUMNS);
+	List	   *attrs;
+	List	   *names;
 	ListCell   *lc;
 	int			i;
+
+	if (list_length(fsplan->fdw_private) < LANCE_FDW_PRIVATE_UNITS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("lance_fdw: the plan carries no projection"),
+				 errdetail("fdw_private has %d entries, expected at least %d.",
+						   list_length(fsplan->fdw_private),
+						   LANCE_FDW_PRIVATE_UNITS)));
+
+	attrs = (List *) list_nth(fsplan->fdw_private, LANCE_FDW_PRIVATE_ATTRS);
+	names = (List *) list_nth(fsplan->fdw_private, LANCE_FDW_PRIVATE_COLUMNS);
 
 	if (list_length(attrs) != list_length(names))
 		ereport(ERROR,

@@ -67,7 +67,7 @@ SELECT lance_regress.capture($$SELECT * FROM lance_regress.ddl_all$$) AS scan;
 \! pg_dump --schema-only --no-owner --table=lance_regress.ddl_all contrib_regression > test/regress/results/ddl_dump.sql 2>&1
 \! grep -c '^CREATE FOREIGN TABLE lance_regress.ddl_all (' test/regress/results/ddl_dump.sql
 DROP FOREIGN TABLE lance_regress.ddl_all;
-\! psql -X -q -d contrib_regression -f test/regress/results/ddl_dump.sql 2>&1
+\! psql -X -q -o /dev/null -d contrib_regression -f test/regress/results/ddl_dump.sql 2>&1
 SELECT o.opt AS table_option
   FROM pg_foreign_table t, unnest(t.ftoptions) AS o(opt)
   WHERE t.ftrelid = 'lance_regress.ddl_all'::regclass ORDER BY 1;

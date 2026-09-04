@@ -82,8 +82,8 @@ of the machine you build on.
 CREATE SERVER lance_local FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri '/data/lance');
 
-IMPORT FOREIGN SCHEMA lance FROM SERVER lance_local INTO public
-  LIMIT TO ("events.lance");
+IMPORT FOREIGN SCHEMA lance LIMIT TO ("events.lance")
+  FROM SERVER lance_local INTO public;
 
 SELECT count(*) FROM public."events.lance";
 ```

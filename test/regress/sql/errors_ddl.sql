@@ -10,8 +10,8 @@
 -- A local path that is not there.
 CREATE SERVER lance_missing FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri 'file:///lance_fdw_no_such_directory');
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_missing
-  INTO lance_regress LIMIT TO ("nope.lance")$$) AS missing_path;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("nope.lance")
+  FROM SERVER lance_missing INTO lance_regress$$) AS missing_path;
 -- Nothing was left half-created.
 SELECT count(*) AS leftovers
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -49,12 +49,12 @@ BEGIN
                  current_setting('regress.s3_secret'));
 END
 $$;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badbucket
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS missing_bucket;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badcreds
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS bad_credentials;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badendpoint
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS unreachable_endpoint;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badbucket INTO lance_regress$$) AS missing_bucket;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badcreds INTO lance_regress$$) AS bad_credentials;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badendpoint INTO lance_regress$$) AS unreachable_endpoint;
 -- After all of that, the same backend still reads a real dataset.
 DO $$
 BEGIN
@@ -62,8 +62,8 @@ BEGIN
                  current_setting('regress.fixture_dir'));
 END
 $$;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_ok
-  INTO lance_regress LIMIT TO ("frag_7.lance")$$) AS after_errors;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_7.lance")
+  FROM SERVER lance_ok INTO lance_regress$$) AS after_errors;
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
   FROM pg_attribute a
   WHERE a.attrelid = 'lance_regress."frag_7.lance"'::regclass

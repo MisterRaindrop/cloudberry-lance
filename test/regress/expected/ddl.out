@@ -76,8 +76,7 @@ CREATE SERVER lance_bad FOREIGN DATA WRAPPER lance_fdw OPTIONS (allow_http 'mayb
 ERROR:  invalid value for option "allow_http": "maybe"
 DETAIL:  The value must be a boolean, for example true or false.
 CREATE SERVER lance_bad FOREIGN DATA WRAPPER lance_fdw OPTIONS (mpp_execute 'sideways');
-ERROR:  invalid value for option "mpp_execute": "sideways"
-DETAIL:  Valid values are any, coordinator and all segments.
+ERROR:  "sideways" is not a valid mpp_execute value
 CREATE USER MAPPING FOR PUBLIC SERVER lance_coord_srv OPTIONS (password 'x');
 ERROR:  invalid option "password"
 HINT:  Valid options in this context are: aws_access_key_id, aws_secret_access_key, aws_session_token.
@@ -119,7 +118,7 @@ scan not implemented
 \! grep -c '^CREATE FOREIGN TABLE lance_regress.ddl_all (' test/regress/results/ddl_dump.sql
 1
 DROP FOREIGN TABLE lance_regress.ddl_all;
-\! psql -X -q -d contrib_regression -f test/regress/results/ddl_dump.sql 2>&1
+\! psql -X -q -o /dev/null -d contrib_regression -f test/regress/results/ddl_dump.sql 2>&1
 SELECT o.opt AS table_option
   FROM pg_foreign_table t, unnest(t.ftoptions) AS o(opt)
   WHERE t.ftrelid = 'lance_regress.ddl_all'::regclass ORDER BY 1;

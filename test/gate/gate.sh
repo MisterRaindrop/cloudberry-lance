@@ -32,6 +32,9 @@ REMOTE=${LANCE_GATE_REMOTE:-/home/gpadmin/cloudberry-lance}
 LANCE_SRC_DIR=${LANCE_GATE_LANCE_SRC:-/home/gpadmin/lance-src}
 LANCE_REV=e934cc2c
 QD_PORT=${LANCE_GATE_PORT:-7000}
+# gpadmin's login shell does not put pg_config/psql on PATH; the server ships the
+# environment file, so every remote script sources it first (PROBES, P1 gate).
+PG_ENV=${LANCE_GATE_PG_ENV:-/usr/local/cloudberry-db/greenplum_path.sh}
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ENV_FILE="$ROOT/test/gate/env.sh"
@@ -136,6 +139,7 @@ remote() {
 	shift
 	{
 		printf 'set -euo pipefail\n'
+		printf 'source %q\n' "$PG_ENV"
 		printf 'REMOTE=%q\n' "$REMOTE"
 		printf 'LANCE_SRC_DIR=%q\n' "$LANCE_SRC_DIR"
 		printf 'LANCE_REV=%q\n' "$LANCE_REV"
@@ -151,7 +155,7 @@ remote() {
 }
 
 remote_quiet() {
-	docker exec -u gpadmin "$CONTAINER" bash -lc "$1"
+	docker exec -u gpadmin "$CONTAINER" bash -lc "source $(printf %q "$PG_ENV") && $1"
 }
 
 # ---------------------------------------------------------------------------

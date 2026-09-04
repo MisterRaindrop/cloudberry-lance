@@ -15,6 +15,7 @@ set -euo pipefail
 CONTAINER=${LANCE_GATE_CONTAINER:-cbdb-repro-1850}
 QD_PORT=${LANCE_GATE_PORT:-7000}
 DATABASES=${LANCE_GATE_DATABASES:-contrib_regression}
+PG_ENV=${LANCE_GATE_PG_ENV:-/usr/local/cloudberry-db/greenplum_path.sh}
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ENV_FILE="$ROOT/test/gate/env.sh"
@@ -40,6 +41,7 @@ for db in $DATABASES; do
 	say "dropping schema lance_regress in $db"
 	docker exec -u gpadmin "$CONTAINER" bash -lc "
 		set -e
+		source $(printf %q "$PG_ENV")
 		if psql -p $QD_PORT -d postgres -tAc \
 			\"SELECT 1 FROM pg_database WHERE datname = '$db'\" | grep -q 1; then
 			psql -p $QD_PORT -d '$db' -v ON_ERROR_STOP=1 \

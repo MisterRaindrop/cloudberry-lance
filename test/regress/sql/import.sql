@@ -13,8 +13,8 @@ BEGIN
                  current_setting('regress.fixture_dir'));
 END
 $$;
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress
-  LIMIT TO ("types_all.lance");
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("types_all.lance")
+  FROM SERVER lance_files INTO lance_regress;
 ALTER FOREIGN TABLE lance_regress."types_all.lance" RENAME TO types_all;
 -- Every A-tier Arrow type, mapped as DESIGN section 2 says.
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
@@ -28,8 +28,8 @@ SELECT o.opt AS table_option
   FROM pg_foreign_table t, unnest(t.ftoptions) AS o(opt)
   WHERE t.ftrelid = 'lance_regress.types_all'::regclass ORDER BY 1;
 -- B-tier columns are skipped, loudly, and what is left is still imported.
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress
-  LIMIT TO ("types_b.lance");
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("types_b.lance")
+  FROM SERVER lance_files INTO lance_regress;
 ALTER FOREIGN TABLE lance_regress."types_b.lance" RENAME TO types_b;
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
   FROM pg_attribute a
@@ -39,8 +39,8 @@ SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS defin
 -- A blob-encoded column is B-tier even though its Arrow type is large_binary,
 -- because the scanner hands out a descriptor for it (PROBES Q3); the plain
 -- large_binary column next to it imports as bytea.
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress
-  LIMIT TO ("blob.lance");
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("blob.lance")
+  FROM SERVER lance_files INTO lance_regress;
 ALTER FOREIGN TABLE lance_regress."blob.lance" RENAME TO blobs;
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
   FROM pg_attribute a
@@ -48,8 +48,8 @@ SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS defin
     AND a.attnum > 0 AND NOT a.attisdropped
   ORDER BY a.attnum;
 -- Two datasets in one statement.
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress
-  LIMIT TO ("frag_1.lance", "frag_2.lance");
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("frag_1.lance", "frag_2.lance")
+  FROM SERVER lance_files INTO lance_regress;
 SELECT c.relname AS imported
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'lance_regress' AND c.relkind = 'f' AND c.relname LIKE 'frag%'
@@ -57,12 +57,12 @@ SELECT c.relname AS imported
 -- Without LIMIT TO there is nothing to enumerate, and saying so is the whole
 -- point (DESIGN D15).
 IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress;
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_files INTO lance_regress
-  EXCEPT ("types_all.lance");
+IMPORT FOREIGN SCHEMA fixtures EXCEPT ("types_all.lance")
+  FROM SERVER lance_files INTO lance_regress;
 -- A relative name needs a base_uri to be relative to.
 CREATE SERVER lance_nobase FOREIGN DATA WRAPPER lance_fdw;
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_nobase INTO lance_regress
-  LIMIT TO (relative_name);
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO (relative_name)
+  FROM SERVER lance_nobase INTO lance_regress;
 -- The same import over s3://, with the credentials coming from the user
 -- mapping (I4) and never from the statement text.
 DO $$
@@ -79,8 +79,8 @@ BEGIN
                  current_setting('regress.s3_secret'));
 END
 $$;
-IMPORT FOREIGN SCHEMA fixtures FROM SERVER lance_s3 INTO lance_regress
-  LIMIT TO ("frag_3.lance");
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_s3 INTO lance_regress;
 ALTER FOREIGN TABLE lance_regress."frag_3.lance" RENAME TO frag_3_s3;
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
   FROM pg_attribute a

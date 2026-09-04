@@ -10,8 +10,8 @@
 -- A local path that is not there.
 CREATE SERVER lance_missing FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri 'file:///lance_fdw_no_such_directory');
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_missing
-  INTO lance_regress LIMIT TO ("nope.lance")$$) AS missing_path;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("nope.lance")
+  FROM SERVER lance_missing INTO lance_regress$$) AS missing_path;
 missing_path
 lance error
 (1 row)
@@ -55,18 +55,18 @@ BEGIN
                  current_setting('regress.s3_secret'));
 END
 $$;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badbucket
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS missing_bucket;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badbucket INTO lance_regress$$) AS missing_bucket;
 missing_bucket
 lance error
 (1 row)
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badcreds
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS bad_credentials;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badcreds INTO lance_regress$$) AS bad_credentials;
 bad_credentials
 lance error
 (1 row)
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_badendpoint
-  INTO lance_regress LIMIT TO ("frag_3.lance")$$) AS unreachable_endpoint;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_3.lance")
+  FROM SERVER lance_badendpoint INTO lance_regress$$) AS unreachable_endpoint;
 unreachable_endpoint
 lance error
 (1 row)
@@ -77,8 +77,8 @@ BEGIN
                  current_setting('regress.fixture_dir'));
 END
 $$;
-SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x FROM SERVER lance_ok
-  INTO lance_regress LIMIT TO ("frag_7.lance")$$) AS after_errors;
+SELECT lance_regress.capture($$IMPORT FOREIGN SCHEMA x LIMIT TO ("frag_7.lance")
+  FROM SERVER lance_ok INTO lance_regress$$) AS after_errors;
 after_errors
 no error
 (1 row)

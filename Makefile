@@ -17,6 +17,10 @@
 # The cargo build needs Rust >= 1.91, protoc and access to a crates registry;
 # see README.md.  test/gate/gate.sh prepares all of that inside the container.
 
+# check-syntax / check-scripts are defined before PGXS is included, so name the
+# default goal explicitly or `make` would run the syntax check instead of building.
+.DEFAULT_GOAL := all
+
 MODULE_big = lance_fdw
 EXTENSION = lance_fdw
 DATA = sql/lance_fdw--0.1.sql

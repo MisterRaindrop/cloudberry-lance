@@ -66,11 +66,21 @@ lance_dispatch_make_units(const char *uri, uint64 version,
 						  const uint64 *ids, int nids)
 {
 	List	   *unit = NIL;
+	char	   *ids_text = lance_dispatch_ids_string(ids, nids);
+
+	/*
+	 * A dataset with no fragments would otherwise put an empty String node
+	 * into the plan, and whether one of those survives plan serialisation is
+	 * not something to bet an empty dataset on.  One space reads back as no
+	 * ids, and spaces are escaped by the serialiser like any other.
+	 */
+	if (ids_text[0] == '\0')
+		ids_text = pstrdup(" ");
 
 	unit = lappend(unit, makeString(pstrdup(LANCE_SCAN_UNIT_KIND)));
 	unit = lappend(unit, makeString(pstrdup(uri)));
 	unit = lappend(unit, makeString(psprintf(UINT64_FORMAT, version)));
-	unit = lappend(unit, makeString(lance_dispatch_ids_string(ids, nids)));
+	unit = lappend(unit, makeString(ids_text));
 
 	return unit;
 }

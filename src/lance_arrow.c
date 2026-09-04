@@ -359,6 +359,10 @@ lance_conv_text(LanceConverter *conv, int64 row)
 
 	lance_check_varlena_size(conv, sv.size_bytes);
 
+	/* A column of nothing but empty strings has no data buffer at all. */
+	if (sv.size_bytes == 0)
+		return PointerGetDatum(cstring_to_text_with_len("", 0));
+
 	return PointerGetDatum(cstring_to_text_with_len(sv.data,
 													(int) sv.size_bytes));
 }
@@ -502,11 +506,10 @@ lance_arrow_resolve_converter(const struct ArrowSchema *field, Oid pgtypid,
 							  &is_b_tier))
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
-				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported",
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported and cannot be read as %s",
 						colname, lance_arrow_format(field),
-						lance_arrow_name_or(field, "unparsable")),
-				 errdetail("The foreign table declares this column %s.",
-						   format_type_with_typemod(pgtypid, pgtypmod)),
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
 				 errhint("Drop the column from the foreign table, or read it "
 						 "with a tool that understands the type.")));
 
@@ -528,11 +531,14 @@ lance_arrow_resolve_converter(const struct ArrowSchema *field, Oid pgtypid,
 	if (out->convert == NULL && !lance_converter_type_known(view.type))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported in this build",
+				 errmsg("lance_fdw: column \"%s\": Lance type \"%s\" (%s) is not supported in this build and cannot be read as %s",
 						colname, lance_arrow_format(field),
-						lance_arrow_name_or(field, "unparsable")),
-				 errdetail("The foreign table declares this column %s.",
-						   format_type_with_typemod(pgtypid, pgtypmod))));
+						lance_arrow_name_or(field, "unparsable"),
+						format_type_with_typemod(pgtypid, pgtypmod)),
+				 errdetail("This Arrow type maps to %s, but no converter for it "
+						   "is compiled in yet.",
+						   format_type_with_typemod(natural_typid,
+													natural_typmod))));
 
 	if (out->convert == NULL)
 		ereport(ERROR,

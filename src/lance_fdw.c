@@ -3,12 +3,10 @@
  * lance_fdw.c
  *	  Handler and validator for the lance_fdw foreign-data wrapper.
  *
- * This change carries the DDL surface: the extension installs, servers, user
- * mappings and foreign tables validate their options, and IMPORT FOREIGN
- * SCHEMA turns a Lance dataset schema into a foreign table.  The scan
- * callbacks are registered but only far enough to plan; BeginForeignScan says
- * so instead of returning wrong rows.  The MPP scan replaces them in the next
- * change.
+ * The callbacks here are thin: option handling lives in lance_option.c, the
+ * fragment split in lance_dispatch.c and everything between BeginForeignScan
+ * and EndForeignScan in lance_scan.c.  What is left is the planner side -
+ * a constant row estimate, one path, and the projection the scan will read.
  *
  * IDENTIFICATION
  *	  src/lance_fdw.c
@@ -20,16 +18,22 @@
 #include "fmgr.h"
 
 #include "lance_fdw.h"
+#include "lance_dispatch.h"
 #include "lance_import.h"
 #include "lance_option.h"
 #include "lance_runtime.h"
+#include "lance_scan.h"
 
 #include "access/reloptions.h"
+#include "access/table.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
+#include "nodes/makefuncs.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "utils/rel.h"
 
 PG_MODULE_MAGIC;
 
@@ -48,10 +52,6 @@ static ForeignScan *lanceGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel,
 										List *tlist,
 										List *scan_clauses,
 										Plan *outer_plan);
-static void lanceBeginForeignScan(ForeignScanState *node, int eflags);
-static TupleTableSlot *lanceIterateForeignScan(ForeignScanState *node);
-static void lanceReScanForeignScan(ForeignScanState *node);
-static void lanceEndForeignScan(ForeignScanState *node);
 
 void
 _PG_init(void)
@@ -68,10 +68,11 @@ lance_fdw_handler(PG_FUNCTION_ARGS)
 	routine->GetForeignRelSize = lanceGetForeignRelSize;
 	routine->GetForeignPaths = lanceGetForeignPaths;
 	routine->GetForeignPlan = lanceGetForeignPlan;
-	routine->BeginForeignScan = lanceBeginForeignScan;
-	routine->IterateForeignScan = lanceIterateForeignScan;
-	routine->ReScanForeignScan = lanceReScanForeignScan;
-	routine->EndForeignScan = lanceEndForeignScan;
+	routine->BeginForeignScan = lance_scan_begin;
+	routine->IterateForeignScan = lance_scan_next;
+	routine->ReScanForeignScan = lance_scan_rescan;
+	routine->EndForeignScan = lance_scan_end;
+	routine->ExplainForeignScan = lance_scan_explain;
 
 	routine->ImportForeignSchema = lanceImportForeignSchema;
 
@@ -134,22 +135,94 @@ lanceGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
 			 root);
 }
 
+/*
+ * Which columns does the scan have to read (DESIGN D6)?
+ *
+ * Everything the query references, whether it is selected or only used in a
+ * qual - this block pushes no filter down, so a WHERE clause is evaluated here
+ * and its columns still have to arrive.  A whole-row reference or a system
+ * column (gp_segment_id, say) needs the whole tuple, so it widens to every
+ * user column.  Nothing referenced at all - count(*) - leaves both lists
+ * empty, and lance-c still reports the length of every batch, so the rows are
+ * counted without reading a column (PROBES Q1).
+ */
+static void
+lance_plan_projection(RelOptInfo *baserel, Oid foreigntableid,
+					  List **retrieved_attrs, List **columns)
+{
+	Bitmapset  *attrs_used = NULL;
+	Relation	rel;
+	TupleDesc	tupdesc;
+	bool		all_columns = false;
+	ListCell   *lc;
+	AttrNumber	attnum;
+	int			member = -1;
+
+	*retrieved_attrs = NIL;
+	*columns = NIL;
+
+	pull_varattnos((Node *) baserel->reltarget->exprs, baserel->relid,
+				   &attrs_used);
+	foreach(lc, baserel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		pull_varattnos((Node *) rinfo->clause, baserel->relid, &attrs_used);
+	}
+
+	while ((member = bms_next_member(attrs_used, member)) >= 0)
+	{
+		if (member + FirstLowInvalidHeapAttributeNumber <= 0)
+			all_columns = true;
+	}
+
+	rel = table_open(foreigntableid, NoLock);
+	tupdesc = RelationGetDescr(rel);
+
+	for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, attnum - 1);
+
+		/* A dropped column has no name to ask Lance for. */
+		if (att->attisdropped)
+			continue;
+
+		if (!all_columns &&
+			!bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+						   attrs_used))
+			continue;
+
+		*retrieved_attrs = lappend_int(*retrieved_attrs, attnum);
+		*columns = lappend(*columns,
+						   makeString(lance_get_column_name(foreigntableid,
+															attnum,
+															NameStr(att->attname))));
+	}
+
+	table_close(rel, NoLock);
+}
+
 static ForeignScan *
 lanceGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel,
 					Oid foreigntableid, ForeignPath *best_path,
 					List *tlist, List *scan_clauses, Plan *outer_plan)
 {
+	List	   *retrieved_attrs;
+	List	   *columns;
 	List	   *fdw_private;
 
 	/* No filter pushdown yet: every clause stays with the ForeignScan. */
 	scan_clauses = extract_actual_clauses(scan_clauses, false);
 
+	lance_plan_projection(baserel, foreigntableid, &retrieved_attrs, &columns);
+
 	/*
-	 * DESIGN D2 reserves slot 0 for retrieved_attrs and slot 1 for the Lance
-	 * column names; the QD appends the scan units at slot 2 in
-	 * BeginForeignScan.  Both are filled in once the scan exists.
+	 * DESIGN D2: slot 0 is the attribute list, slot 1 the Lance column names
+	 * that go with it one for one.  The QD appends the scan units at slot 2 in
+	 * BeginForeignScan, and a QE tells whether it heard from the QD by the
+	 * length of this list.
 	 */
-	fdw_private = list_make2(NIL, NIL);
+	fdw_private = list_make2(retrieved_attrs, columns);
 
 	return make_foreignscan(tlist,
 							scan_clauses,
@@ -159,30 +232,4 @@ lanceGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel,
 							NIL,	/* no custom tlist */
 							NIL,	/* no recheck quals */
 							outer_plan);
-}
-
-static void
-lanceBeginForeignScan(ForeignScanState *node, int eflags)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("lance_fdw: scan is not implemented in this build"),
-			 errdetail("This build provides the DDL and IMPORT FOREIGN SCHEMA surface only.")));
-}
-
-static TupleTableSlot *
-lanceIterateForeignScan(ForeignScanState *node)
-{
-	/* Unreachable: BeginForeignScan never lets a scan start. */
-	return NULL;
-}
-
-static void
-lanceReScanForeignScan(ForeignScanState *node)
-{
-}
-
-static void
-lanceEndForeignScan(ForeignScanState *node)
-{
 }

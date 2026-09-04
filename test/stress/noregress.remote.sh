@@ -192,7 +192,9 @@ compare() {
 			continue
 		fi
 		say "$stream differs between '$a' and '$b':"
-		diff -u "$WORK/$stream.$a" "$WORK/$stream.$b" | head -40 | sed 's/^/    /'
+		# diff exits non-zero exactly when there is something to show, and head
+		# can leave it with a broken pipe; neither is this function's failure.
+		diff -u "$WORK/$stream.$a" "$WORK/$stream.$b" | head -40 | sed 's/^/    /' || true
 		FAILURES=$(( FAILURES + 1 ))
 	done
 }

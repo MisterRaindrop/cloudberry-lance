@@ -214,7 +214,11 @@ session_open() {
 	psql -p "$PGPORT" -d "$db" -qX -f "$SESS_DIR/in" \
 		>"$SESS_DIR/out" 2>"$SESS_DIR/err" </dev/null &
 	SESS_PSQL=$!
-	exec 3>"$SESS_DIR/in"
+	# Read-write on purpose: opening a fifo for writing alone blocks until a
+	# reader shows up, and a psql that failed to connect never becomes one, so
+	# that spelling turns a bad database name into a hang.  Closing this fd
+	# still leaves no writer, so psql still sees the end of its input.
+	exec 3<>"$SESS_DIR/in"
 
 	session_send '\pset format unaligned'
 	session_send '\pset tuples_only on'

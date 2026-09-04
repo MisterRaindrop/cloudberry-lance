@@ -106,6 +106,8 @@ qe_count() {
 
 sample() {
 	local label=$1 fd rss threads qe
+	[ -r "/proc/$SESS_PID/status" ] ||
+		die "backend $SESS_PID is gone: the session did not survive the loop"
 	fd=$(ls -1 "/proc/$SESS_PID/fd" 2>/dev/null | wc -l)
 	rss=$(awk '/^VmRSS:/ { print $2 }' "/proc/$SESS_PID/status")
 	threads=$(ls -1 "/proc/$SESS_PID/task" | wc -l)
@@ -165,14 +167,16 @@ if [ "$ERRORS" != "$EXPECTED" ]; then
 	say "expected $EXPECTED errors from $(( ROUNDS + 1 )) rounds of $KINDS, saw $ERRORS"
 	FAILURES=$(( FAILURES + 1 ))
 else
-	say "all $ERRORS statements failed, as they were meant to; the three kinds read:"
-	grep 'ERROR:' "$SESS_DIR/err" | head -"$KINDS" | sed 's/^/    /'
+	say "all $ERRORS statements failed, as they were meant to; the first round read:"
+	# head closes the pipe on grep long before it is done, which is not a
+	# failure of this script.
+	grep 'ERROR:' "$SESS_DIR/err" | head -"$KINDS" | sed 's/^/    /' || true
 fi
 
 # AC7's other clause: the session that took all that still works.
 if GOOD=$(session_value 'SELECT count(*) FROM lance_regress.leak_good' 60); then
 	say "the same session then read frag_3.lance: $GOOD rows"
-	if [ "$GOOD" -le 0 ]; then
+	if ! [ "$GOOD" -gt 0 ] 2>/dev/null; then
 		say "that scan should have returned rows"
 		FAILURES=$(( FAILURES + 1 ))
 	fi

@@ -92,12 +92,16 @@ SQL
 
 # Which of the two interrupts a message is about, or none if the statement got
 # through.  Anything else is a failure and the text goes into the report.
+#
+# The text arrives as a here-string rather than through a pipe on purpose: with
+# pipefail, a `printf | grep -q` whose grep stops reading early can report the
+# printf's broken pipe as the pipeline's status and turn a match into a miss.
 classify() {
-	if printf '%s\n' "$1" | grep -qi 'statement timeout'; then
+	if grep -qi 'statement timeout' <<<"$1"; then
 		echo timeout
-	elif printf '%s\n' "$1" | grep -qiE 'canceling (statement|mpp operation|query)|due to user request|cancell?ed on user|query was cancel'; then
+	elif grep -qiE 'canceling (statement|mpp operation|query)|due to user request|cancell?ed on user|query was cancel' <<<"$1"; then
 		echo cancel
-	elif printf '%s\n' "$1" | grep -q 'ERROR:'; then
+	elif grep -q 'ERROR:' <<<"$1"; then
 		echo other
 	else
 		echo none
@@ -193,7 +197,7 @@ round() {
 		*)
 			FAILURES=$(( FAILURES + 1 ))
 			say "round $n ($mode): an error that is not a cancellation:"
-			printf '%s\n' "$new" | head -5
+			printf '%s\n' "$new" | head -5 || true
 			;;
 	esac
 	return 0

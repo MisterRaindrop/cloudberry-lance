@@ -18,7 +18,7 @@ END
 $$;
 -- Deliberately on one line: the server logs DDL verbatim, and the gate's grep
 -- forgives a log line only when the words CREATE USER MAPPING are on it.
-CREATE USER MAPPING FOR PUBLIC SERVER creds_srv OPTIONS (aws_access_key_id 'LANCE_CANARY_KEY_9f3a', aws_secret_access_key 'LANCE_CANARY_SECRET_9f3a');
+CREATE USER MAPPING FOR PUBLIC SERVER creds_srv OPTIONS (aws_access_key_id 'LANCE_CANARY_KEY_9f3a', aws_secret_access_key 'LANCE_CANARY_SECRET_9f3a', aws_session_token 'LANCE_CANARY_TOKEN_9f3a');
 CREATE FOREIGN TABLE lance_regress.creds_t (id integer, v text, n bigint)
   SERVER creds_srv OPTIONS (uri 'frag_3.lance');
 -- The needles are spelled as two halves so that these statements do not
@@ -33,6 +33,12 @@ SELECT lance_regress.plan_mentions('SELECT * FROM lance_regress.creds_t',
                                    'VERBOSE, COSTS OFF',
                                    'LANCE_CANARY' || '_KEY_9f3a') AS key_in_plan;
 key_in_plan
+f
+(1 row)
+SELECT lance_regress.plan_mentions('SELECT * FROM lance_regress.creds_t',
+                                   'VERBOSE, COSTS OFF',
+                                   'LANCE_CANARY' || '_TOKEN_9f3a') AS token_in_plan;
+token_in_plan
 f
 (1 row)
 SELECT lance_regress.plan_mentions('SELECT count(*) FROM lance_regress.creds_t',

@@ -41,11 +41,12 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ENV_FILE="$ROOT/test/gate/env.sh"
 FIXTURE_DIR="$ROOT/test/fixtures/data"
 
-# The fake secret test/regress/sql/creds.sql puts in a user mapping.  After the
-# suites have run, it may appear in a server log only on the line that carries
-# the CREATE USER MAPPING statement itself, which the server echoes like any
-# other DDL (AC8).
-CREDS_CANARY=LANCE_CANARY_SECRET_9f3a
+# The three fake credentials test/regress/sql/creds.sql puts in a user mapping:
+# all of them are user-mapping options the wrapper reads, so all three are
+# checked.  After the suites have run, one may appear in a server log only on
+# the line that carries the CREATE USER MAPPING statement itself, which the
+# server echoes like any other DDL (AC8).
+CREDS_CANARIES="LANCE_CANARY_KEY_9f3a LANCE_CANARY_SECRET_9f3a LANCE_CANARY_TOKEN_9f3a"
 CLUSTER_LOGS=(
 	/home/gpadmin/demo/datadirs/qddir/demoDataDir-1/log
 	/home/gpadmin/demo/datadirs/dbfast1/demoDataDir0/log
@@ -348,7 +349,7 @@ check_credential_leak() {
 			;;
 	esac
 
-	say "checking the coordinator and segment logs for the user mapping secret"
+	say "checking the coordinator and segment logs for the user mapping credentials"
 	remote "
 found=no
 leaked=no
@@ -357,14 +358,17 @@ for dir in ${CLUSTER_LOGS[*]}; do
 	for f in \"\$dir\"/*.csv; do
 		[ -f \"\$f\" ] || continue
 		found=yes
-		# The CREATE USER MAPPING statement is logged verbatim and is written
-		# on one line for exactly this reason; anything else is a leak.
-		hits=\$(grep -h ${CREDS_CANARY} \"\$f\" | grep -v 'CREATE USER MAPPING' || true)
-		if [ -n \"\$hits\" ]; then
-			leaked=yes
-			echo \"leak in \$f:\"
-			printf '%s\\n' \"\$hits\" | head -5
-		fi
+		for canary in ${CREDS_CANARIES}; do
+			# The CREATE USER MAPPING statement is logged verbatim and is
+			# written on one line for exactly this reason; anything else is a
+			# leak.
+			hits=\$(grep -h \"\$canary\" \"\$f\" | grep -v 'CREATE USER MAPPING' || true)
+			if [ -n \"\$hits\" ]; then
+				leaked=yes
+				echo \"leak of \$canary in \$f:\"
+				printf '%s\\n' \"\$hits\" | head -5
+			fi
+		done
 	done
 done
 if [ \"\$found\" = no ]; then
@@ -372,10 +376,10 @@ if [ \"\$found\" = no ]; then
 	exit 1
 fi
 if [ \"\$leaked\" = yes ]; then
-	echo 'AC8: the user mapping secret reached a server log' >&2
+	echo 'AC8: a user mapping credential reached a server log' >&2
 	exit 1
 fi
-echo 'credential check: the secret appears only in the CREATE USER MAPPING statement'
+echo 'credential check: all three credentials appear only in the CREATE USER MAPPING statement'
 "
 }
 

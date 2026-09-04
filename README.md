@@ -56,12 +56,14 @@ To use a lance-c that already exists instead of building the submodule:
 
 ```sh
 make LANCE_C_PREFIX=/opt/lance-c              # expects include/ and lib/
-make LANCE_C_INCDIR=... LANCE_C_LIBDIR=...    # override either half
+make LANCE_C_INCDIR=... LANCE_C_LIBDIR=...    # name the two directories
 make USE_PKGCONFIG_LANCE_C=1                  # ask pkg-config for lance-c
 ```
 
-In that case nothing is installed for lance-c and the rpath points at the
-library where it already lives.
+In every one of those cases nothing is installed for lance-c and the rpath
+points at the library where it already lives. Naming only `LANCE_C_INCDIR`
+leaves `LANCE_C_LIBDIR` pointing into the submodule's build directory, and the
+rpath then points there too, so pass both or use `LANCE_C_PREFIX`.
 
 Other targets:
 
@@ -171,8 +173,8 @@ and works even against a server whose credentials are wrong.
 
 | Option | Meaning |
 |---|---|
-| `aws_access_key_id` | |
-| `aws_secret_access_key` | |
+| `aws_access_key_id` | The access key identifier to sign requests with. |
+| `aws_secret_access_key` | The secret half of that key pair. |
 | `aws_session_token` | For temporary credentials. |
 
 Credentials are read from the user mapping in whichever process needs them and
@@ -184,7 +186,7 @@ are never put into a plan, an `EXPLAIN`, or a log line.
 |---|---|
 | `uri` | Required. Either absolute (`s3://...`, `file:///...`, `/abs/path`) or relative to the server's `base_uri`. |
 | `version` | Dataset version to read. `0`, the default, means the latest at the time the statement runs. |
-| `batch_size` | Rows per Arrow batch. Default is lance's own, 8192. Lower it for datasets with large binary columns. |
+| `batch_size` | Rows per Arrow batch. Unset means lance-c decides, which is 8192 rows unless its own `LANCE_DEFAULT_BATCH_SIZE` says otherwise. Lower it for datasets with large binary columns. |
 | `rows_hint` | Row estimate for the planner. Default 100000. Planning does no I/O, so this is the only way the planner can know better. |
 | `mpp_execute` | Overrides the server's setting. |
 

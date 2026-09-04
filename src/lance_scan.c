@@ -94,13 +94,13 @@ lance_scan_cleanup(void *arg)
 
 	if (state->batch.release != NULL)
 	{
-		state->batch.release(&state->batch);
+		LANCE_MASKED(state->batch.release(&state->batch));
 		state->batch.release = NULL;
 	}
 
 	if (state->schema.release != NULL)
 	{
-		state->schema.release(&state->schema);
+		LANCE_MASKED(state->schema.release(&state->schema));
 		state->schema.release = NULL;
 	}
 
@@ -167,6 +167,7 @@ static void
 lance_scan_open_dataset(LanceScanState *state, uint64 version)
 {
 	const char **storage_opts;
+	LanceSession *session;
 
 	/*
 	 * Credentials are read here, on whichever process is about to do the I/O,
@@ -175,14 +176,17 @@ lance_scan_open_dataset(LanceScanState *state, uint64 version)
 	storage_opts = lance_build_storage_options(state->opts.serverid,
 											   state->userid);
 
-	state->dataset = lance_dataset_open_with_session(state->uri,
-													 (const char *const *) storage_opts,
-													 version,
-													 lance_rt_session());
+	/* Brings the runtime up, and may ereport: outside the masked call. */
+	session = lance_rt_session();
+
+	LANCE_MASKED(state->dataset = lance_dataset_open_with_session(state->uri,
+																  (const char *const *) storage_opts,
+																  version,
+																  session));
 	LANCE_CHECK(state->dataset != NULL, state->uri);
 	state->ds_handle = lance_rt_track_dataset(state->dataset);
 
-	state->version = lance_dataset_version(state->dataset);
+	LANCE_MASKED(state->version = lance_dataset_version(state->dataset));
 }
 
 static void
@@ -201,44 +205,56 @@ lance_scan_close_dataset(LanceScanState *state)
 static void
 lance_scan_list_fragments(LanceScanState *state)
 {
-	uint64		count = lance_dataset_fragment_count(state->dataset);
+	uint64		count;
+
+	LANCE_MASKED(count = lance_dataset_fragment_count(state->dataset));
 
 	state->total_fragments = (int) count;
 	state->nids = (int) count;
 	state->ids = count > 0 ? (uint64 *) palloc(sizeof(uint64) * count) : NULL;
 
 	if (count > 0)
-		LANCE_CHECK(lance_dataset_fragment_ids(state->dataset, state->ids) == 0,
-					state->uri);
+	{
+		int32		rc;
+
+		LANCE_MASKED(rc = lance_dataset_fragment_ids(state->dataset, state->ids));
+		LANCE_CHECK(rc == 0, state->uri);
+	}
 }
 
 static void
 lance_scan_make_scanner(LanceScanState *state)
 {
-	state->scanner = lance_scanner_new(state->dataset,
-									   (const char *const *) state->columns,
-									   NULL);
+	int32		rc;
+
+	LANCE_MASKED(state->scanner = lance_scanner_new(state->dataset,
+													(const char *const *) state->columns,
+													NULL));
 	LANCE_CHECK(state->scanner != NULL, state->uri);
 	state->sc_handle = lance_rt_track_scanner(state->scanner);
 
 	/* Both of these have to be set before a stream is taken. */
-	LANCE_CHECK(lance_scanner_set_fragment_ids(state->scanner, state->ids,
-											   (size_t) state->nids) == 0,
-				state->uri);
+	LANCE_MASKED(rc = lance_scanner_set_fragment_ids(state->scanner, state->ids,
+													 (size_t) state->nids));
+	LANCE_CHECK(rc == 0, state->uri);
 
 	if (state->opts.batch_size > 0)
-		LANCE_CHECK(lance_scanner_set_batch_size(state->scanner,
-												 state->opts.batch_size) == 0,
-					state->uri);
+	{
+		LANCE_MASKED(rc = lance_scanner_set_batch_size(state->scanner,
+													   state->opts.batch_size));
+		LANCE_CHECK(rc == 0, state->uri);
+	}
 }
 
 static void
 lance_scan_open_stream(LanceScanState *state)
 {
+	int32		rc;
+
 	state->stream = lance_rt_track_new_stream(&state->stream_handle);
-	LANCE_CHECK(lance_scanner_to_arrow_stream(state->scanner,
-											  state->stream) == 0,
-				state->uri);
+	LANCE_MASKED(rc = lance_scanner_to_arrow_stream(state->scanner,
+													state->stream));
+	LANCE_CHECK(rc == 0, state->uri);
 	state->stream_done = false;
 }
 
@@ -253,9 +269,11 @@ lance_scan_build_converters(LanceScanState *state, Relation rel)
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			i;
+	int			rc;
 
 	memset(&state->schema, 0, sizeof(state->schema));
-	if (state->stream->get_schema(state->stream, &state->schema) != 0)
+	LANCE_MASKED(rc = state->stream->get_schema(state->stream, &state->schema));
+	if (rc != 0)
 		lance_scan_stream_error(state);
 
 	if (state->schema.n_children != (int64) state->ncolumns)
@@ -417,7 +435,7 @@ lance_scan_stream_error(LanceScanState *state)
 	char	   *message;
 
 	if (state->stream != NULL && state->stream->get_last_error != NULL)
-		raw = state->stream->get_last_error(state->stream);
+		LANCE_MASKED(raw = state->stream->get_last_error(state->stream));
 
 	message = pstrdup(raw != NULL ? raw : "unknown error");
 
@@ -432,7 +450,7 @@ lance_scan_release_batch(LanceScanState *state)
 {
 	if (state->batch.release != NULL)
 	{
-		state->batch.release(&state->batch);
+		LANCE_MASKED(state->batch.release(&state->batch));
 		state->batch.release = NULL;
 	}
 
@@ -462,7 +480,7 @@ lance_scan_next_batch(LanceScanState *state)
 	if (state->stream_done)
 		return false;
 
-	rc = state->stream->get_next(state->stream, &state->batch);
+	LANCE_MASKED(rc = state->stream->get_next(state->stream, &state->batch));
 	if (rc != 0)
 	{
 		/*

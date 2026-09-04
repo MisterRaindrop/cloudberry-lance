@@ -92,7 +92,7 @@ Timings to expect, on 16 cores:
 | Step | Cost |
 |---|---|
 | lance-c from a cold `target/` | ~16 minutes; `--clean` pays this every time |
-| the 12 pg_regress suites | ~45 seconds |
+| the 13 pg_regress suites | ~45 seconds |
 | the two unreachable-endpoint cases inside that, in `errors_ddl` and `errors_scan` | ~10 seconds each, spent in the object store's retry backoff |
 
 With a warm `target/` the rest of a round is the tar, the extension's own

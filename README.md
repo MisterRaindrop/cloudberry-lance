@@ -327,6 +327,7 @@ The suites, in the order they run:
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
 | `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
 | `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
+| `sigmask` | I5, read back from `/proc`: after a scan in this backend every lance-c thread blocks the signals a backend is driven by, and the main thread does not |
 
 After the suites, the gate greps the coordinator and segment logs for the fake
 secret the `creds` suite puts in a user mapping. The only line allowed to

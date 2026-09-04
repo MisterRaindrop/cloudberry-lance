@@ -12,6 +12,8 @@
 #ifndef LANCE_RUNTIME_H
 #define LANCE_RUNTIME_H
 
+#include <signal.h>
+
 #include "lance_fdw.h"
 
 /* GUCs, registered by lance_rt_define_gucs() from _PG_init() */
@@ -72,6 +74,33 @@ extern void lance_rt_error(const char *uri) pg_attribute_noreturn();
 	do { \
 		if (!(ok)) \
 			lance_rt_error(uri); \
+	} while (0)
+
+/*
+ * I5: lance-c code never runs on this thread with signals deliverable.
+ *
+ * The Rust side builds its thread pools lazily - tokio's runtime on the first
+ * block_on(), lance's own IO and compute pools on the first read - and a new
+ * thread inherits the signal mask of the thread that creates it.  So every
+ * call into lance-c, not just the first, is made with all signals blocked on
+ * the backend's main thread; the mask is restored as soon as the call returns
+ * and anything that arrived meanwhile is delivered right there, still on the
+ * main thread.  See lance_rt_block_signals() for the longer story.
+ *
+ * `stmt` must be the FFI call and at most an assignment of its result: nothing
+ * inside may ereport() or otherwise longjmp, because that would skip the
+ * restore and leave the backend deaf to every signal for good.  Call
+ * lance_rt_session(), palloc() and LANCE_CHECK() before or after, never inside.
+ */
+extern void lance_rt_block_signals(sigset_t *saved);
+extern void lance_rt_restore_signals(const sigset_t *saved);
+
+#define LANCE_MASKED(stmt) \
+	do { \
+		sigset_t	lance_saved_mask_; \
+		lance_rt_block_signals(&lance_saved_mask_); \
+		stmt; \
+		lance_rt_restore_signals(&lance_saved_mask_); \
 	} while (0)
 
 #endif							/* LANCE_RUNTIME_H */

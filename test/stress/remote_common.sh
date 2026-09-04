@@ -75,11 +75,22 @@ SQL
 	CREATED_DB=yes
 }
 
+# The backend of a session that has just closed takes a moment to go away, and
+# DROP DATABASE refuses while it is still there, so this one retries.
 drop_db() {
+	local try
 	say "dropping the database $1"
-	psql_run postgres <<SQL
+	for try in 1 2 3 4 5; do
+		if psql_run postgres <<SQL
 DROP DATABASE IF EXISTS "$1";
 SQL
+		then
+			return 0
+		fi
+		sleep 1
+	done
+	say "could not drop the database $1; something is still connected to it"
+	return 1
 }
 
 # ---------------------------------------------------------------------------

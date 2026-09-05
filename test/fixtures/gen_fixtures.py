@@ -381,6 +381,11 @@ class Built:
     post: Optional[Callable[[lance.LanceDataset, str], None]] = None
     notes: list = dc_field(default_factory=list)
     has_expected: bool = True
+    #: Lance file format this dataset *must* be written in, overriding both
+    #: pylance's default and --data-storage-version.  Some Arrow shapes exist in
+    #: exactly one format: pylance 11 writes map only at 2.2, and refuses a v1
+    #: blob column from 2.2 on, so one global version cannot cover the set.
+    storage_version: Optional[str] = None
 
 
 def build_types_all() -> Built:
@@ -850,8 +855,12 @@ def _write_dataset(path: str, built: Built, storage_version: Optional[str]):
     kwargs = {}
     if built.max_rows_per_file is not None:
         kwargs["max_rows_per_file"] = built.max_rows_per_file
-    if storage_version:
-        kwargs["data_storage_version"] = storage_version
+    # A dataset that names its own format wins over --data-storage-version:
+    # asking for 2.0 across the board must not silently produce a maps.lance
+    # that pylance cannot write.
+    version = built.storage_version or storage_version
+    if version:
+        kwargs["data_storage_version"] = version
     source = built.table if built.reader is None else built.reader
     lance.write_dataset(source, path, **kwargs)
     if built.post is not None:

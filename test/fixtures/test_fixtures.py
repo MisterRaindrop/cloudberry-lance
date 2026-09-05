@@ -386,6 +386,38 @@ def test_command_line_can_pin_the_lance_file_format(tmp_path):
     assert m["datasets"]["frag_1"]["file_format_versions"] == ["2.0"]
 
 
+def test_a_dataset_that_names_its_format_overrides_the_command_line(tmp_path,
+                                                                    monkeypatch):
+    """Some Arrow shapes exist in exactly one Lance format (maps, blob v2).
+
+    Pinning 2.0 for the DESIGN Q4 fallback must not silently produce a dataset
+    pylance cannot write; the builder's own version wins, and the manifest says
+    which version each dataset actually got.
+    """
+    def build_pinned():
+        return gen.Built(purpose="storage-version override probe",
+                         table=gen._simple_table(2), storage_version="2.2")
+
+    monkeypatch.setitem(gen.BUILDERS, "frag_1", build_pinned)
+    root = str(tmp_path)
+    gen.main(["--root", root, "--datasets", "frag_1",
+              "--data-storage-version", "2.0", "--quiet"])
+    m = json.load(open(os.path.join(root, "manifest.json")))
+    # The request is still recorded globally; the dataset reports what it is.
+    assert m["generated_by"]["data_storage_version_requested"] == "2.0"
+    assert m["datasets"]["frag_1"]["data_storage_version"] == "2.2"
+    assert m["datasets"]["frag_1"]["file_format_versions"] == ["2.2"]
+
+
+def test_datasets_without_an_override_still_follow_the_command_line(manifest):
+    """Only the datasets that have to pin a format may pin one."""
+    pinned = {n: gen.BUILDERS[n]().storage_version for n in gen.BUILDERS}
+    for name, version in pinned.items():
+        if version is None:
+            continue
+        assert entry(manifest, name)["data_storage_version"] == version, name
+
+
 def test_classify_follows_the_design_type_table():
     assert gen.classify(pa.int32()) == ("A", "integer")
     assert gen.classify(pa.uint32()) == ("A", "bigint")

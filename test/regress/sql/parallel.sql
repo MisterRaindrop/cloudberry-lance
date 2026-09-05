@@ -112,3 +112,14 @@ SELECT lance_regress.message($$SELECT count(*) FROM lance_regress.par_3_wide$$) 
 -- The narrow widths above still work, and so does the default.
 SELECT count(*) AS rows FROM lance_regress.par_3_two;
 SELECT count(*) AS rows FROM lance_regress.par_3;
+-- The refusal belongs to the all-segments path alone.  Under coordinator and
+-- any, one process reads every fragment, so there is no split for the width to
+-- narrow and nothing to refuse: the same above-cluster width is simply ignored
+-- and all 15 rows come back.  A regression that moved the check out of the
+-- all-segments branch on the QD would turn these two into errors.
+CREATE FOREIGN TABLE lance_regress.par_3_wide_coord (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_3.lance', mpp_execute 'coordinator', num_segments '4');
+CREATE FOREIGN TABLE lance_regress.par_3_wide_any (id integer, v text, n bigint)
+  SERVER par_files OPTIONS (uri 'frag_3.lance', mpp_execute 'any', num_segments '4');
+SELECT count(*) AS rows, sum(n) AS sum_n FROM lance_regress.par_3_wide_coord;
+SELECT count(*) AS rows, sum(n) AS sum_n FROM lance_regress.par_3_wide_any;

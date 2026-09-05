@@ -436,8 +436,12 @@ lance_arrow_map_struct(const struct ArrowSchema *field, Oid *typid, int32 *typmo
 	int64		i;
 
 	/*
-	 * An empty struct has no composite type: PostgreSQL has no zero-column
-	 * composite, so there is nothing to declare.
+	 * A struct with no subfields carries no value to read.  PostgreSQL would
+	 * take a zero-column composite type, so this is a choice rather than a
+	 * limit: a column of one is a row of nothing, and refusing it loudly is
+	 * what B-tier is for.  classify() calls such a struct A-tier, which is the
+	 * one place the two disagree about structs; nothing in test/fixtures builds
+	 * one, so neither answer is exercised.
 	 */
 	if (field->n_children < 1 || field->children == NULL)
 		return false;
@@ -459,9 +463,15 @@ lance_arrow_map_struct(const struct ArrowSchema *field, Oid *typid, int32 *typmo
 
 /*
  * The tier decision itself, for a column and for every field inside one.  It
- * mirrors classify() in test/fixtures/gen_fixtures.py rule for rule: that
- * function is what the fixtures' manifest was written from, so the two have to
- * agree or the manifest describes a database this build does not produce.
+ * follows classify() in test/fixtures/gen_fixtures.py: that function is what
+ * the fixtures' manifest was written from, so the two have to agree over
+ * everything the manifest describes or the manifest describes a database this
+ * build does not produce.
+ *
+ * Two shapes no fixture contains are refused here and accepted there, in the
+ * safe direction: large_list, which has had no converter since the scan was
+ * written, and a struct with no subfields.  Adding either means adding a
+ * fixture for it first.
  *
  * There is deliberately no "unrecognised means A-tier" and no "unrecognised
  * means jsonb" (DESIGN D-A5): anything not named here is B-tier.

@@ -67,10 +67,8 @@ uri=types_all.lance
 IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("types_b.lance")
   FROM SERVER lance_files INTO lance_regress;
 NOTICE:  skipping column "c_uint64" of "types_b.lance": Arrow type "L" (uint64) is not supported
-NOTICE:  skipping column "c_struct" of "types_b.lance": Arrow type "+s" (struct) is not supported
 NOTICE:  skipping column "c_dict" of "types_b.lance": Arrow type "i" (dictionary) is not supported
 NOTICE:  skipping column "c_list_list" of "types_b.lance": Arrow type "+l" (list) is not supported
-NOTICE:  skipping column "c_list_struct" of "types_b.lance": Arrow type "+l" (list) is not supported
 NOTICE:  skipping column "c_duration" of "types_b.lance": Arrow type "tDu" (duration) is not supported
 ALTER FOREIGN TABLE lance_regress."types_b.lance" RENAME TO types_b;
 SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS definition
@@ -81,7 +79,9 @@ SELECT format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)) AS defin
 definition
 id integer
 keep_utf8 text
-(2 rows)
+c_struct lance_regress.lance_types_b_lance_c_struct
+c_list_struct lance_regress.lance_types_b_lance_c_list_struct[]
+(4 rows)
 -- A blob-encoded column is B-tier even though its Arrow type is large_binary,
 -- because the scanner hands out a descriptor for it (PROBES Q3); the plain
 -- large_binary column next to it imports as bytea.

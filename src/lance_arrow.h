@@ -19,6 +19,8 @@
 
 #include "lance_fdw.h"
 
+#include "access/tupdesc.h"
+
 /*
  * Decide the tier of an Arrow field and, for A-tier fields, the PostgreSQL
  * type to declare for it.
@@ -27,10 +29,15 @@
  * metadata - a field carrying "lance-encoding" = "blob" is B-tier whatever its
  * Arrow type says.  That is a policy choice rather than a technical limit:
  * such a field is Lance's v1 blob encoding and its bytes do arrive with the
- * scan, measured at 1, 2 and 4 MiB.  Lance's v2 blob encoding carries no
- * such metadata and never reaches this rule: the scanner hands it out as a
- * five-field descriptor struct with the extension name stripped, so it is
- * refused as an unsupported struct instead.
+ * scan, measured at 1, 2 and 4 MiB.  Lance's v2 blob encoding is refused by a
+ * rule of its own, ahead of the struct rule, because a v2 descriptor is a
+ * struct of A-tier scalars and would otherwise be readable (DESIGN D-A4).
+ *
+ * A struct is A-tier when every one of its subfields is, and it becomes a
+ * PostgreSQL composite type that IMPORT FOREIGN SCHEMA creates; *typid is
+ * RECORDOID here, because the composite type's name is derived from the
+ * foreign table and so does not exist yet.  A map<utf8|large_utf8, A-tier
+ * scalar> is A-tier and becomes jsonb.
  *
  * Returns true when the field is A-tier, in which case *typid and *typmod are
  * set; *is_b_tier is always set and is the inverse of the return value.
@@ -40,6 +47,17 @@ extern bool lance_arrow_map_type(const struct ArrowSchema *field,
 								 Oid *typid,
 								 int32 *typmod,
 								 bool *is_b_tier);
+
+/*
+ * Why a B-tier field is B-tier, as an errdetail sentence, when the reason is a
+ * part of the field rather than the field itself: which subfield sank a struct,
+ * which half of a map does not fit, or that this is a Blob v2 descriptor.
+ *
+ * NULL when the field's own Arrow type is the whole story - a uint64 column
+ * needs no explanation beyond its type, and printing one would only add noise
+ * to messages that already say everything.  The result is palloc'd.
+ */
+extern char *lance_arrow_b_tier_detail(const struct ArrowSchema *field);
 
 /* Is this field stored with Lance's blob encoding? */
 extern bool lance_arrow_is_blob_encoded(const struct ArrowSchema *field);
@@ -98,6 +116,18 @@ struct LanceConverter
 	bool		elembyval;
 	char		elemalign;
 	LanceConverter *element;	/* element converter for list-shaped columns */
+
+	/*
+	 * Subfield converters, one per Arrow child, in the order the Arrow schema
+	 * has them: the fields of a struct, or the key and the value of a map.  A
+	 * struct also keeps the declared composite type's descriptor and, per Arrow
+	 * child, the attribute of that descriptor it fills - the two differ once a
+	 * composite type has a dropped attribute, which stays NULL.
+	 */
+	LanceConverter *fields;
+	int			nfields;
+	TupleDesc	tupdesc;
+	int		   *fieldatt;
 };
 
 /*

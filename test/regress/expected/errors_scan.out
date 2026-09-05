@@ -129,7 +129,7 @@ CREATE FOREIGN TABLE lance_regress.errs_struct (c_struct text)
   SERVER errs_files OPTIONS (uri 'types_b.lance');
 SELECT lance_regress.message($$SELECT * FROM lance_regress.errs_struct$$) AS struct_into_text;
 struct_into_text
-lance_fdw: column "c_struct": Lance type "+s" (struct) is not supported and cannot be read as text
+lance_fdw: column "c_struct": Lance type "+s" (struct) cannot be read as text
 (1 row)
 CREATE FOREIGN TABLE lance_regress.errs_uint64 (c_uint64 bigint)
   SERVER errs_files OPTIONS (uri 'types_b.lance');

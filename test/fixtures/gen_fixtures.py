@@ -53,12 +53,50 @@ TS_DIGITS = {"s": 0, "ms": 3, "us": 6, "ns": 9}
 # type classification (DESIGN §2 A-tier table)
 # --------------------------------------------------------------------------
 
-def classify(t: pa.DataType) -> tuple[str, Optional[str]]:
+#: Arrow extension name Lance puts on a Blob v2 column.  The field's declared
+#: type is ``struct<data: large_binary, uri: utf8>``; what a scan hands back is
+#: a five-child descriptor.  Either way the column is B tier.
+BLOB_V2_EXTENSION_NAME = "lance.blob.v2"
+
+
+def decode_metadata(metadata) -> dict:
+    """A pyarrow field's metadata as str -> str; pyarrow spells it in bytes."""
+    if not metadata:
+        return {}
+    return {k.decode() if isinstance(k, bytes) else k:
+            v.decode() if isinstance(v, bytes) else v
+            for k, v in metadata.items()}
+
+
+def is_blob_v2(t: pa.DataType, metadata=None) -> bool:
+    """Is this field a Lance Blob v2 column?
+
+    The tag reaches us one of two ways.  ``import lance`` registers the
+    extension, so pyarrow resolves ``ARROW:extension:name`` into an
+    ExtensionType and the key disappears from the field metadata; a schema read
+    without that registration keeps the raw key instead.  Accept both.
+    """
+    if isinstance(t, pa.ExtensionType) and t.extension_name == BLOB_V2_EXTENSION_NAME:
+        return True
+    return decode_metadata(metadata).get("ARROW:extension:name") == BLOB_V2_EXTENSION_NAME
+
+
+def classify(t: pa.DataType, metadata=None) -> tuple[str, Optional[str]]:
     """Return ``(tier, pg_type)`` for an Arrow type, per DESIGN §2.
 
     Tier "A" types are the ones the first block must read; tier "B" types must
-    be skipped on IMPORT and rejected on scan.
+    be skipped on IMPORT and rejected on scan.  ``metadata`` is the owning
+    field's metadata where there is a field: the Blob v2 rule keys off a field
+    tag, not off the type.
+
+    There is deliberately no "unrecognised means A tier" and no "unrecognised
+    means jsonb" fallback: anything this function does not name is B tier.
     """
+    if is_blob_v2(t, metadata):
+        # Explicit, and ahead of the struct rule on purpose.  A v2 descriptor is
+        # a struct of A-tier scalars, so without this rule it would classify A
+        # and the FDW would hand out positions and sizes as if they were data.
+        return "B", None
     if pa.types.is_boolean(t):
         return "A", "boolean"
     if pa.types.is_int8(t) or pa.types.is_int16(t) or pa.types.is_uint8(t):
@@ -86,15 +124,61 @@ def classify(t: pa.DataType) -> tuple[str, Optional[str]]:
         if pa.types.is_float32(t.value_type) or pa.types.is_float64(t.value_type):
             return "A", classify(t.value_type)[1] + "[]"
         return "B", None
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
-        # DESIGN A-tier: list<A-tier scalar>; nested lists are B tier.
-        et = t.value_type
-        if pa.types.is_list(et) or pa.types.is_large_list(et) or \
-                pa.types.is_fixed_size_list(et):
+    if pa.types.is_map(t):
+        # DESIGN A-tier: map<utf8|large_utf8, A-tier scalar> -> jsonb.  A
+        # non-string key would have to be stringified on the way into a jsonb
+        # object, and a container value would have to be flattened; both are
+        # silent distortion, so every other map is B tier.
+        if not (pa.types.is_string(t.key_type) or pa.types.is_large_string(t.key_type)):
             return "B", None
-        etier, epg = classify(et)
+        item = t.item_field
+        if pa.types.is_nested(item.type) or classify(item.type, item.metadata)[0] != "A":
+            return "B", None
+        return "A", "jsonb"
+    if pa.types.is_struct(t):
+        # DESIGN A-tier: a struct is readable only as a whole.  One B-tier
+        # subfield sinks the column -- there is no partial projection.
+        for i in range(t.num_fields):
+            sub = t.field(i)
+            if classify(sub.type, sub.metadata)[0] == "B":
+                return "B", None
+        return "A", "composite"
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        # DESIGN A-tier: list<A-tier element>; nested lists are B tier.
+        vf = t.value_field
+        if pa.types.is_list(vf.type) or pa.types.is_large_list(vf.type) or \
+                pa.types.is_fixed_size_list(vf.type):
+            return "B", None
+        etier, epg = classify(vf.type, vf.metadata)
         return ("A", epg + "[]") if etier == "A" else ("B", None)
     return "B", None
+
+
+def composite_fields(t: pa.DataType) -> Optional[list]:
+    """Ordered ``[subfield name, pg_type]`` pairs for an A-tier struct.
+
+    Returns None for anything that is not one (including a list of them, which
+    reports its element's pairs, and any B-tier struct, which has no PG type to
+    describe).  A subfield that is itself a struct carries its own pairs in a
+    third slot, so the shape is recoverable without parsing ``arrow_type``.
+
+    The manifest cannot name the composite type: PostgreSQL derives that name
+    from the foreign table IMPORT creates, which does not exist at generation
+    time.  A2 matches on this structure instead of on a type name.
+    """
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        return composite_fields(t.value_type)
+    if not pa.types.is_struct(t) or classify(t)[0] == "B":
+        return None
+    out = []
+    for i in range(t.num_fields):
+        sub = t.field(i)
+        pair = [sub.name, classify(sub.type, sub.metadata)[1]]
+        nested = composite_fields(sub.type)
+        if nested is not None:
+            pair.append(nested)
+        out.append(pair)
+    return out
 
 
 def arrow_c_format(field: pa.Field) -> str:
@@ -154,7 +238,11 @@ def _encode_scalar(v, digest: bool) -> object:
         return _digest_bytes(v) if digest else v.hex()
     if isinstance(v, str):
         return _digest_text(v) if digest else v
-    if isinstance(v, list):
+    if isinstance(v, (list, tuple)):
+        # A tuple is how to_pylist() spells one map entry, so a map arrives as a
+        # list of [key, value] pairs.  Keeping the pair form rather than folding
+        # it into a JSON object is what makes a non-string key and a repeated
+        # key representable at all.
         return [_encode_scalar(x, False) for x in v]
     if isinstance(v, dict):
         return {k: _encode_scalar(x, False) for k, x in v.items()}
@@ -200,7 +288,7 @@ def encode_column(field: pa.Field, column: pa.ChunkedArray) -> tuple[list, str]:
     # Everything else goes through to_pylist(); a temporal value nested inside a
     # container would lose sub-microsecond precision there, so refuse A-tier
     # columns that hide one.  B-tier columns are not read by the FDW at all.
-    tier, _ = classify(t)
+    tier, _ = classify(t, field.metadata)
     if tier == "A" and _has_temporal_child(t):
         raise NotImplementedError(
             "column %r: nested temporal types have no lossless expected encoding" % field.name)
@@ -703,20 +791,24 @@ def describe(name: str, built: Built, ds: lance.LanceDataset,
                             for frag in frags for f in frag.metadata.files})
     schema = []
     for f in ds.schema:
-        tier, pg_type = classify(f.type)
-        md = None
-        if f.metadata:
-            md = {k.decode(): v.decode() for k, v in f.metadata.items()}
-        schema.append(Compact({
+        tier, pg_type = classify(f.type, f.metadata)
+        md = decode_metadata(f.metadata) or None
+        col = {
             "name": f.name,
             "arrow_type": str(f.type),
             "arrow_format": arrow_c_format(f),
             "nullable": f.nullable,
             "tier": tier,
             "pg_type": pg_type,
-            "metadata": md,
-            "expected_encoding": encodings.get(f.name),
-        }))
+        }
+        # Only A-tier structs get this key, so every column that had no
+        # composite to describe keeps the entry it already had.
+        fields = composite_fields(f.type) if tier == "A" else None
+        if fields is not None:
+            col["composite_fields"] = fields
+        col["metadata"] = md
+        col["expected_encoding"] = encodings.get(f.name)
+        schema.append(Compact(col))
 
     history = []
     for v in ds.versions():

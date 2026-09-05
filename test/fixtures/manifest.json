@@ -107,10 +107,10 @@
         {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
         {"name": "keep_utf8", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
         {"name": "c_uint64", "arrow_type": "uint64", "arrow_format": "L", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"},
-        {"name": "c_struct", "arrow_type": "struct<a: int32, b: string>", "arrow_format": "+s", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"},
+        {"name": "c_struct", "arrow_type": "struct<a: int32, b: string>", "arrow_format": "+s", "nullable": true, "tier": "A", "pg_type": "composite", "composite_fields": [["a", "integer"], ["b", "text"]], "metadata": null, "expected_encoding": "json"},
         {"name": "c_dict", "arrow_type": "dictionary<values=string, indices=int32, ordered=0>", "arrow_format": "i", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"},
         {"name": "c_list_list", "arrow_type": "list<item: list<item: int64>>", "arrow_format": "+l", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"},
-        {"name": "c_list_struct", "arrow_type": "list<item: struct<a: int32>>", "arrow_format": "+l", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"},
+        {"name": "c_list_struct", "arrow_type": "list<item: struct<a: int32>>", "arrow_format": "+l", "nullable": true, "tier": "A", "pg_type": "composite[]", "composite_fields": [["a", "integer"]], "metadata": null, "expected_encoding": "array"},
         {"name": "c_duration", "arrow_type": "duration[us]", "arrow_format": "tDu", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"}
       ]
     },

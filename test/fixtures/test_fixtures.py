@@ -14,6 +14,7 @@ from decimal import Decimal
 import lance
 import pyarrow as pa
 import pytest
+from lance.blob import BlobType
 
 import gen_fixtures as gen
 from conftest import dataset_path
@@ -103,12 +104,11 @@ def test_schema_matches_manifest(manifest, opened, name):
         assert str(field.type) == col["arrow_type"], field.name
         assert gen.arrow_c_format(field) == col["arrow_format"], field.name
         assert field.nullable == col["nullable"], field.name
-        md = None
-        if field.metadata:
-            md = {k.decode(): v.decode() for k, v in field.metadata.items()}
-        assert md == col["metadata"], field.name
-        tier, pg_type = gen.classify(field.type)
+        assert (gen.decode_metadata(field.metadata) or None) == col["metadata"], field.name
+        tier, pg_type = gen.classify(field.type, field.metadata)
         assert (tier, pg_type) == (col["tier"], col["pg_type"]), field.name
+        fields = gen.composite_fields(field.type) if tier == "A" else None
+        assert fields == col.get("composite_fields"), field.name
 
 
 @pytest.mark.parametrize("name", FROZEN_NAMES)
@@ -197,9 +197,29 @@ def test_types_b_mixes_b_tier_columns_with_importable_ones(manifest):
     b_tier = [c["name"] for c in schema if c["tier"] == "B"]
     a_tier = [c["name"] for c in schema if c["tier"] == "A"]
     assert a_tier, "IMPORT would fail outright with no A-tier column left"
-    for expect in ("c_struct", "c_dict", "c_uint64", "c_list_list"):
+    for expect in ("c_dict", "c_uint64", "c_list_list", "c_duration"):
         assert expect in b_tier, expect
     assert all(by_name[n]["pg_type"] is None for n in b_tier)
+
+
+def test_types_b_struct_columns_moved_to_a_tier_with_the_struct_rule(manifest):
+    """A1 turned these two readable; they are the regression guard for it.
+
+    ``c_struct`` is ``struct<a int32, b utf8>`` and ``c_list_struct`` is a list
+    of one -- every subfield A tier, so the DESIGN struct rule makes both A tier.
+    They were B tier only because ``classify()`` did not know structs yet.
+    """
+    by_name = {c["name"]: c for c in entry(manifest, "types_b")["schema"]}
+    assert (by_name["c_struct"]["tier"], by_name["c_struct"]["pg_type"]) == \
+        ("A", "composite")
+    assert by_name["c_struct"]["composite_fields"] == [["a", "integer"], ["b", "text"]]
+    assert (by_name["c_list_struct"]["tier"], by_name["c_list_struct"]["pg_type"]) == \
+        ("A", "composite[]")
+    assert by_name["c_list_struct"]["composite_fields"] == [["a", "integer"]]
+    # The values themselves did not move: expected/types_b.jsonl is frozen, and
+    # only the label the manifest puts on the list column changed.
+    assert by_name["c_struct"]["expected_encoding"] == "json"
+    assert by_name["c_list_struct"]["expected_encoding"] == "array"
 
 
 def test_deleted_hides_exactly_the_deleted_rows(manifest, fixtures_root):
@@ -375,12 +395,80 @@ def test_classify_follows_the_design_type_table():
     assert gen.classify(pa.list_(pa.float32(), 4)) == ("A", "real[]")
     assert gen.classify(pa.list_(pa.string())) == ("A", "text[]")
     # B tier: DESIGN §2 keeps these out of the first block.
-    for t in (pa.uint64(), pa.struct([("a", pa.int32())]),
-              pa.map_(pa.string(), pa.int32()),
-              pa.dictionary(pa.int32(), pa.string()),
+    for t in (pa.uint64(), pa.dictionary(pa.int32(), pa.string()),
               pa.list_(pa.list_(pa.int64())), pa.duration("us"),
               pa.month_day_nano_interval(), pa.list_(pa.int32(), 2)):
         assert gen.classify(t) == ("B", None), t
+
+
+def test_classify_takes_a_struct_only_when_every_subfield_is_a_tier():
+    """DESIGN struct rule: all of it or none of it, never a partial projection."""
+    ok = pa.struct([("a", pa.int32()), ("b", pa.string())])
+    assert gen.classify(ok) == ("A", "composite")
+    assert gen.classify(pa.struct([("ok", pa.int32()), ("bad", pa.uint64())])) == \
+        ("B", None)
+    # One B-tier subfield anywhere below sinks the whole column.
+    assert gen.classify(pa.struct([("inner", pa.struct([("bad", pa.uint64())]))])) == \
+        ("B", None)
+    assert gen.classify(pa.struct([("arr", pa.list_(pa.int32())),
+                                   ("name", pa.string())])) == ("A", "composite")
+    assert gen.classify(pa.struct([("arr", pa.list_(pa.list_(pa.int32())))])) == \
+        ("B", None)
+    # A list of A-tier structs rides along; a list of B-tier structs does not.
+    assert gen.classify(pa.list_(ok)) == ("A", "composite[]")
+    assert gen.classify(pa.list_(pa.struct([("bad", pa.uint64())]))) == ("B", None)
+
+
+def test_classify_takes_a_map_only_with_string_keys_and_a_scalar_value():
+    """DESIGN map rule: anything else would need stringifying to reach jsonb."""
+    assert gen.classify(pa.map_(pa.string(), pa.int32())) == ("A", "jsonb")
+    assert gen.classify(pa.map_(pa.large_string(), pa.float64())) == ("A", "jsonb")
+    for t in (pa.map_(pa.int32(), pa.string()),          # key is not a string
+              pa.map_(pa.binary(), pa.string()),         # nor is this one
+              pa.map_(pa.string(), pa.uint64()),         # value is B tier
+              pa.map_(pa.string(), pa.list_(pa.int32())),  # value is not a scalar
+              pa.map_(pa.string(), pa.struct([("a", pa.int32())]))):
+        assert gen.classify(t) == ("B", None), t
+    # A map is only ever a leaf: a struct containing a bad one goes down with it.
+    assert gen.classify(pa.struct([("m", pa.map_(pa.string(), pa.int32()))])) == \
+        ("A", "composite")
+    assert gen.classify(pa.struct([("m", pa.map_(pa.int32(), pa.string()))])) == \
+        ("B", None)
+
+
+def test_classify_refuses_blob_v2_by_an_explicit_rule():
+    """The v2 descriptor is a struct of A-tier scalars, so the rule must be explicit."""
+    storage = pa.struct([pa.field("data", pa.large_binary()),
+                         pa.field("uri", pa.string())])
+    # Without the tag it is an ordinary A-tier struct -- that is the whole point.
+    assert gen.classify(storage) == ("A", "composite")
+    tag = {b"ARROW:extension:name": gen.BLOB_V2_EXTENSION_NAME.encode()}
+    assert gen.classify(storage, tag) == ("B", None)
+    assert gen.is_blob_v2(storage, tag)
+    assert not gen.is_blob_v2(storage, {b"lance-encoding": b"blob"})
+    # ... and once pyarrow has resolved the registered extension, off the type.
+    ext = BlobType()
+    assert gen.is_blob_v2(ext)
+    assert gen.classify(ext) == ("B", None)
+    # A tagged field nested in a container drags the container down with it.
+    assert gen.classify(pa.struct([pa.field("b", storage, metadata=tag)])) == ("B", None)
+    assert gen.classify(pa.list_(pa.field("item", storage, metadata=tag))) == ("B", None)
+
+
+def test_composite_fields_describe_the_struct_recursively():
+    inner = pa.struct([("x", pa.int32()), ("y", pa.string())])
+    assert gen.composite_fields(pa.struct([("a", pa.int32()), ("b", pa.string())])) == \
+        [["a", "integer"], ["b", "text"]]
+    # A struct subfield keeps its pg_type and carries its own pairs in slot 3.
+    assert gen.composite_fields(pa.struct([("inner", inner), ("z", pa.int32())])) == \
+        [["inner", "composite", [["x", "integer"], ["y", "text"]]], ["z", "integer"]]
+    # A list reports its element's pairs; the "[]" lives in the column pg_type.
+    assert gen.composite_fields(pa.list_(inner)) == [["x", "integer"], ["y", "text"]]
+    # Nothing to describe: not a struct, or a struct with no PG type at all.
+    assert gen.composite_fields(pa.int32()) is None
+    assert gen.composite_fields(pa.list_(pa.string())) is None
+    assert gen.composite_fields(pa.struct([("bad", pa.uint64())])) is None
+    assert gen.composite_fields(pa.map_(pa.string(), pa.int32())) is None
 
 
 def test_timestamp_encoding_is_utc_iso8601():

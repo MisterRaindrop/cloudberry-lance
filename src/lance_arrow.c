@@ -232,7 +232,7 @@ lance_arrow_map_type(const struct ArrowSchema *field, Oid *typid,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("lance_fdw: Lance returned a field without a type")));
 
-	/* Blob encoding overrides whatever the Arrow type claims (PROBES Q3). */
+	/* Blob encoding overrides whatever the Arrow type claims; see lance_arrow.h. */
 	if (lance_arrow_is_blob_encoded(field))
 		return false;
 

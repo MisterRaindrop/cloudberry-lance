@@ -198,7 +198,7 @@ the gate's credential check allows exactly that one line and nothing else.
 | `batch_size` | Rows per Arrow batch. Unset means lance-c decides, which is 8192 rows unless its own `LANCE_DEFAULT_BATCH_SIZE` says otherwise. Lower it for datasets with large binary columns. |
 | `rows_hint` | Row estimate for the planner. Default 100000. Planning does no I/O, so this is the only way the planner can know better. |
 | `mpp_execute` | Overrides the server's setting. |
-| `num_segments` | Read by Cloudberry rather than by this wrapper: it narrows how many segments run the scan, and the fragment split follows it. A value above the number of segments in the cluster is refused, because such a gang repeats a segment and the two copies cannot be told apart. |
+| `num_segments` | Read by Cloudberry rather than by this wrapper, and it matters only under `mpp_execute 'all segments'`: there it narrows how many segments run the scan, the fragment split follows it, and a value above the number of segments in the cluster is refused, because such a gang repeats a segment and the two copies cannot be told apart. Under `coordinator` or `any` it has no effect and nothing is refused — one process reads every fragment, so there is no split to narrow. |
 
 **Column**
 
@@ -392,10 +392,15 @@ invariant. `docs/testing.md` has the rest, including what the numbers mean.
 
 - The A-tier list in the type table above is complete; everything outside it is
   refused rather than guessed at.
-- Lance's own blob encoding (a field with `lance-encoding: blob` metadata) is
-  B-tier whatever its Arrow type says, because lance-c v0.1.9 returns a
-  `struct{position, size}` descriptor for such a column and offers no API to
-  read the bytes behind it.
+- Lance's two blob encodings are both B-tier whatever the Arrow type says, but
+  for two different reasons. A field carrying `lance-encoding: blob` metadata
+  (Lance's v1 encoding) is a `large_binary` whose bytes **do** arrive with the
+  scan — measured on values of 1, 2 and 4 MiB — so refusing it is a policy
+  choice this block has not revisited, not a technical limit. A field carrying
+  `ARROW:extension:name = lance.blob.v2` reaches the scanner as a five-field
+  descriptor struct (`kind`, `position`, `size`, `blob_id`, `blob_uri`) with
+  the extension name stripped, and lance-c v0.1.9 exposes no call that turns a
+  descriptor back into a payload; it is refused as an unsupported struct.
 - The refusal of a nanosecond timestamp that is not a whole microsecond is
   implemented but untested: every timestamp in `test/fixtures` is
   microsecond-aligned, and the fixtures are not this package's to change.

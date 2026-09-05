@@ -24,6 +24,8 @@ FROZEN_NAMES = [
     "types_all", "types_b", "deleted", "empty", "empty_b",
     "frag_1", "frag_2", "frag_3", "frag_7", "frag_100", "frag_gap",
     "evolved", "blob", "large_text", "versions", "strict",
+    # A1: struct / map / blob v2, for A2 to read against.
+    "nested", "nested_btier", "maps", "blobv2",
 ]
 
 #: Every A-tier Arrow type of DESIGN §2 has to appear in types_all.  Losing a
@@ -310,6 +312,104 @@ def test_blob_and_large_text_reach_the_advertised_sizes(fixtures_root, manifest)
     col = {c["name"]: c for c in entry(manifest, "large_text")["schema"]}
     assert col["txt"]["arrow_type"] == "large_string"
     assert col["small"]["expected_encoding"] == "text", "short column must stay literal"
+
+
+def test_nested_holds_every_a_tier_struct_shape(manifest):
+    """A2 reads these four shapes; the manifest is where it learns their PG side."""
+    by_name = {c["name"]: c for c in entry(manifest, "nested")["schema"]}
+    assert all(c["tier"] == "A" for c in by_name.values())
+    assert by_name["c_struct"]["pg_type"] == "composite"
+    assert by_name["c_struct"]["composite_fields"] == [["a", "integer"], ["b", "text"]]
+    # Nested two deep: the subfield keeps its own pg_type and its own pairs.
+    assert by_name["c_nested"]["composite_fields"] == \
+        [["inner", "composite", [["x", "integer"], ["y", "text"]]], ["z", "integer"]]
+    # A list of structs is composite[], described by its element.
+    assert by_name["c_list_struct"]["pg_type"] == "composite[]"
+    assert by_name["c_list_struct"]["composite_fields"] == \
+        [["a", "integer"], ["b", "text"]]
+    # A list inside a struct is just another subfield type.
+    assert by_name["c_struct_list"]["composite_fields"] == \
+        [["arr", "integer[]"], ["name", "text"]]
+
+
+def test_nested_values_survive_the_round_trip(fixtures_root, opened):
+    """Read the values, not just the types: a NULL struct is not a struct of NULLs."""
+    rows = [json.loads(line) for line in expected_lines(fixtures_root, "nested")]
+    assert len(rows) == 6
+    assert rows[0]["c_struct"] == {"a": 1, "b": "x"}
+    assert rows[0]["c_nested"]["inner"] == {"x": 1, "y": "y"}
+    assert rows[0]["c_nested"]["z"] == 2
+    assert rows[0]["c_struct_list"] == {"arr": [1, 2, 3], "name": "n0"}
+    assert rows[0]["c_list_struct"] == [{"a": 1, "b": "x"}]
+
+    # The three ways of being empty, which a converter must not collapse.
+    assert rows[1]["c_struct"] is None, "whole value NULL"
+    assert rows[2]["c_struct"] == {"a": None, "b": None}, "present, subfields NULL"
+    assert rows[2]["c_nested"] == {"inner": None, "z": None}, "NULL nested subfield"
+    assert rows[2]["c_list_struct"] == [], "empty list is not a NULL list"
+    assert rows[1]["c_list_struct"] is None
+    assert rows[5]["c_list_struct"][0] is None, "NULL element in a non-NULL list"
+    assert rows[5]["c_struct_list"]["arr"] is None, "NULL list in a non-NULL struct"
+
+    # And what pylance itself hands back agrees, since that is the whole claim.
+    assert opened("nested").to_table().to_pylist()[0]["c_nested"]["inner"]["y"] == "y"
+
+
+def test_nested_btier_sinks_the_whole_struct_for_one_subfield(manifest, opened):
+    """No partial projection: 'ok' is A tier and still unreachable."""
+    e = entry(manifest, "nested_btier")
+    col = {c["name"]: c for c in e["schema"]}["c_struct_b"]
+    assert col["arrow_type"] == "struct<ok: int32, bad: uint64>"
+    assert (col["tier"], col["pg_type"]) == ("B", None)
+    assert "composite_fields" not in col, "a B-tier struct has no PG composite"
+    # The A-tier subfield really is A tier on its own -- that is what makes the
+    # refusal a decision rather than an accident.
+    struct_type = opened("nested_btier").schema.field("c_struct_b").type
+    assert gen.classify(struct_type.field("ok").type) == ("A", "integer")
+    assert gen.classify(struct_type.field("bad").type) == ("B", None)
+
+
+def test_maps_classify_in_opposite_directions(manifest, fixtures_root):
+    """map is readable only with a string key; the two columns hold the same rows."""
+    schema = {c["name"]: c for c in entry(manifest, "maps")["schema"]}
+    assert (schema["c_map_utf8_i32"]["tier"], schema["c_map_utf8_i32"]["pg_type"]) == \
+        ("A", "jsonb")
+    assert (schema["c_map_i32_utf8"]["tier"], schema["c_map_i32_utf8"]["pg_type"]) == \
+        ("B", None)
+    assert schema["c_map_utf8_i32"]["arrow_format"] == "+m"
+    assert schema["c_map_i32_utf8"]["arrow_format"] == "+m", "same Arrow shape"
+
+    rows = [json.loads(line) for line in expected_lines(fixtures_root, "maps")]
+    # Pairs, not an object: a non-string key has nowhere else to go.
+    assert rows[0]["c_map_utf8_i32"] == [["a", 1], ["b", 2]]
+    assert rows[0]["c_map_i32_utf8"] == [[1, "x"], [2, "yy"]]
+    assert rows[1]["c_map_utf8_i32"] == [], "empty map"
+    assert rows[2]["c_map_utf8_i32"] is None, "NULL map is not an empty one"
+    assert rows[3]["c_map_utf8_i32"] == [["k", None]], "present key, NULL value"
+
+
+def test_blobv2_column_is_refused_whatever_it_holds(manifest, opened):
+    """DESIGN's explicit rule: a v2 descriptor is all A-tier scalars and still B."""
+    col = {c["name"]: c for c in entry(manifest, "blobv2")["schema"]}["c_blob_v2"]
+    assert (col["tier"], col["pg_type"]) == ("B", None)
+    assert col["arrow_format"] == "+s", "a struct, as far as the C interface knows"
+    assert entry(manifest, "blobv2")["data_storage_version"] == "2.2"
+
+    field = opened("blobv2").schema.field("c_blob_v2")
+    assert gen.is_blob_v2(field.type, field.metadata)
+    # The thresholds only pick the storage strategy; they are not what makes it v2.
+    assert field.metadata == {b"lance-encoding:blob-inline-size-threshold": b"65536"}
+
+    # What a scan returns is a descriptor of five A-tier scalars, so an FDW that
+    # went by the returned type alone would hand out file offsets as data.
+    returned = opened("blobv2").to_table().schema.field("c_blob_v2").type
+    assert [returned.field(i).name for i in range(returned.num_fields)] == \
+        ["kind", "position", "size", "blob_id", "blob_uri"]
+    assert not gen.is_blob_v2(returned), "the tag does not survive into the scan"
+
+    # An A-tier neighbour is still readable: the refusal is per column.
+    assert {c["name"]: c["tier"] for c in entry(manifest, "blobv2")["schema"]}["note"] \
+        == "A"
 
 
 # --------------------------------------------------------------------------

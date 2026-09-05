@@ -685,6 +685,188 @@ def build_strict() -> Built:
                "cannot contain at all"])
 
 
+def build_nested() -> Built:
+    """A-tier struct in the four shapes A2 has to read.
+
+    Values are spelled out rather than generated: there are six rows, and a
+    reviewer comparing them against expected/nested.jsonl should be able to see
+    what a NULL struct, a struct of NULLs and a NULL list element each look like
+    without running anything.  That keeps the no-clock/no-RNG rule too.
+    """
+    s = pa.struct([("a", pa.int32()), ("b", pa.string())])
+    inner = pa.struct([("x", pa.int32()), ("y", pa.string())])
+    nested = pa.struct([("inner", inner), ("z", pa.int32())])
+    ls = pa.list_(s)
+    sl = pa.struct([("arr", pa.list_(pa.int32())), ("name", pa.string())])
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("c_struct", s),
+        pa.field("c_nested", nested),
+        pa.field("c_list_struct", ls),
+        pa.field("c_struct_list", sl),
+    ])
+    i32max, i32min = 2147483647, -2147483648
+    return Built(
+        purpose="A-tier struct: flat, nested two deep, inside a list and holding "
+                "a list, with NULLs at every level (whole value, subfield and "
+                "list element).",
+        table=pa.table({
+            "id": pa.array([0, 1, 2, 3, 4, 5], pa.int32()),
+            "c_struct": pa.array([
+                {"a": 1, "b": "x"},
+                None,
+                {"a": None, "b": None},
+                {"a": -1, "b": ""},
+                {"a": i32max, "b": "ünicøde"},
+                {"a": 0, "b": "quote\"back\\slash"},
+            ], s),
+            "c_nested": pa.array([
+                {"inner": {"x": 1, "y": "y"}, "z": 2},
+                None,
+                {"inner": None, "z": None},
+                {"inner": {"x": None, "y": None}, "z": -1},
+                {"inner": {"x": i32min, "y": "tab\tnl\n"}, "z": 0},
+                {"inner": {"x": 0, "y": ""}, "z": i32max},
+            ], nested),
+            "c_list_struct": pa.array([
+                [{"a": 1, "b": "x"}],
+                None,
+                [],
+                [{"a": None, "b": None}, {"a": 2, "b": "yy"}],
+                [{"a": 0, "b": ""}],
+                [None, {"a": 5, "b": "e"}],
+            ], ls),
+            "c_struct_list": pa.array([
+                {"arr": [1, 2, 3], "name": "n0"},
+                None,
+                {"arr": [], "name": ""},
+                {"arr": [None, 7], "name": None},
+                {"arr": [i32min, i32max], "name": "edge"},
+                {"arr": None, "name": "n5"},
+            ], sl),
+        }, schema=schema),
+        max_rows_per_file=3,
+        notes=["every column is A tier: each carries pg_type 'composite' (or "
+               "'composite[]') and an ordered composite_fields, which is what A2 "
+               "builds the PostgreSQL composite from",
+               "row 1 is NULL in every column, row 2 is a struct whose subfields "
+               "are all NULL: a reader must tell those two apart",
+               "c_list_struct row 5 holds a NULL element inside a non-NULL list, "
+               "and c_struct_list row 5 a NULL list inside a non-NULL struct"])
+
+
+def build_nested_btier() -> Built:
+    """One B-tier subfield, and the whole struct goes with it."""
+    s = pa.struct([("ok", pa.int32()), ("bad", pa.uint64())])
+    schema = pa.schema([pa.field("id", pa.int32(), nullable=False),
+                        pa.field("c_struct_b", s)])
+    return Built(
+        purpose="A struct whose subfields are one A-tier int32 and one B-tier "
+                "uint64: the column must be B tier as a whole, because there is "
+                "no partial projection of a struct.",
+        table=pa.table({
+            "id": pa.array([0, 1, 2, 3], pa.int32()),
+            "c_struct_b": pa.array([
+                {"ok": 1, "bad": 0},
+                None,
+                {"ok": None, "bad": 18446744073709551615},
+                {"ok": -1, "bad": None},
+            ], s),
+        }, schema=schema),
+        notes=["'ok' on its own would be A tier; the point of the fixture is "
+               "that reading it anyway is not on offer",
+               "'bad' reaches uint64's maximum, which is exactly what no PG "
+               "integer type can hold"])
+
+
+def build_maps() -> Built:
+    """Two maps that must classify in opposite directions."""
+    ok = pa.map_(pa.string(), pa.int32())
+    bad = pa.map_(pa.int32(), pa.string())
+    schema = pa.schema([pa.field("id", pa.int32(), nullable=False),
+                        pa.field("c_map_utf8_i32", ok),
+                        pa.field("c_map_i32_utf8", bad)])
+    return Built(
+        purpose="map<utf8,int32> (A tier, jsonb) beside map<int32,utf8> (B tier: "
+                "a non-string key would have to be stringified to become a jsonb "
+                "object, which is silent distortion).",
+        table=pa.table({
+            "id": pa.array([0, 1, 2, 3, 4], pa.int32()),
+            "c_map_utf8_i32": pa.array([
+                [("a", 1), ("b", 2)],
+                [],
+                None,
+                [("k", None)],
+                [("", 0), ("ünicøde", -1)],
+            ], ok),
+            "c_map_i32_utf8": pa.array([
+                [(1, "x"), (2, "yy")],
+                None,
+                [],
+                [(7, None)],
+                [(-1, ""), (0, "z")],
+            ], bad),
+        }, schema=schema),
+        max_rows_per_file=3, storage_version="2.2",
+        notes=["written at 2.2 because pylance 11 writes Arrow map in no other "
+               "Lance file format: 2.0 and 2.1 both refuse it",
+               "an empty map (row 1/2) and a NULL map are different values, as "
+               "are a present key with a NULL value (row 3) and an absent key",
+               "expected/maps.jsonl spells each map as a list of [key, value] "
+               "pairs, which is the only form that survives a non-string key"])
+
+
+def build_blobv2() -> Built:
+    """A Lance Blob v2 column, which must be refused whatever it contains.
+
+    The field is declared as ``struct<data: large_binary, uri: utf8>`` carrying
+    ``ARROW:extension:name = lance.blob.v2``; the size thresholds beside it only
+    pick the storage strategy.  A scan does not return that struct -- it returns
+    a five-child descriptor of position, size and strategy -- so an FDW that let
+    the column through would hand out file offsets as if they were the payload.
+    """
+    storage = pa.struct([pa.field("data", pa.large_binary()),
+                         pa.field("uri", pa.string())])
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("note", pa.string()),
+        pa.field("c_blob_v2", storage, nullable=True, metadata={
+            "ARROW:extension:name": BLOB_V2_EXTENSION_NAME,
+            # Pinned, not defaulted: every value stays inline (kind=0), so the
+            # descriptors in the expected file do not move when pylance changes
+            # its own default thresholds.
+            "lance-encoding:blob-inline-size-threshold": "65536",
+        }),
+    ])
+    return Built(
+        purpose="A Blob v2 column beside two A-tier ones: the v2 descriptor must "
+                "be refused even though all five of its children are A-tier "
+                "scalars.",
+        table=pa.table({
+            "id": pa.array([0, 1, 2, 3], pa.int32()),
+            "note": pa.array(["three bytes", "empty", None, "sixty-four bytes"],
+                             pa.string()),
+            "c_blob_v2": pa.array([
+                {"data": b"abc", "uri": None},
+                {"data": b"", "uri": None},
+                None,
+                {"data": det_bytes("blobv2", 64), "uri": None},
+            ], storage),
+        }, schema=schema),
+        max_rows_per_file=2, storage_version="2.2",
+        notes=["written at 2.2 because Blob v2 needs it: pylance 11 refuses the "
+               "extension type below 2.2, and refuses the v1 lance-encoding:blob "
+               "column from 2.2 on, so blob.lance and this one cannot share a "
+               "storage version",
+               "reading lance registers the extension, so pyarrow resolves the "
+               "field's arrow_type to extension<lance.blob.v2<BlobType>> and the "
+               "ARROW:extension:name key is no longer in the field metadata; "
+               "classify() accepts the tag in either place",
+               "to_table() returns {kind, position, size, blob_id, blob_uri}, "
+               "not the bytes: kind 0 is inline, and size is the real payload "
+               "size, so the expected file records offsets rather than data"])
+
+
 def build_big(fragments: int, rows_per_fragment: int, blob_bytes: int) -> Callable[[], Built]:
     """AC5 timing fixture: not deterministic, not byte-compared, opt-in."""
     def build() -> Built:
@@ -731,6 +913,12 @@ BUILDERS: dict[str, Callable[[], Built]] = {
     "large_text": build_large_text,
     "versions": build_versions,
     "strict": build_strict,
+    # A1 (WORKPLAN §2) appends: inserting them anywhere else would reorder the
+    # dataset keys of a manifest whose existing entries are frozen.
+    "nested": build_nested,
+    "nested_btier": build_nested_btier,
+    "maps": build_maps,
+    "blobv2": build_blobv2,
 }
 
 BIG = "big"

@@ -505,6 +505,126 @@
         {"name": "s_plain", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
         {"name": "s_nul", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"}
       ]
+    },
+    "nested": {
+      "name": "nested",
+      "purpose": "A-tier struct: flat, nested two deep, inside a list and holding a list, with NULLs at every level (whole value, subfield and list element).",
+      "path": "data/nested.lance",
+      "version": 1,
+      "rows": 6,
+      "fragments": 2,
+      "fragment_ids": [0, 1],
+      "fragment_rows": [3, 3],
+      "fragment_physical_rows": [3, 3],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1, 1],
+      "data_storage_version": "2.1",
+      "file_format_versions": ["2.1"],
+      "history": [
+        {"version": 1, "rows": 6}
+      ],
+      "expected": "expected/nested.jsonl",
+      "expected_rows": 6,
+      "notes": [
+        "every column is A tier: each carries pg_type 'composite' (or 'composite[]') and an ordered composite_fields, which is what A2 builds the PostgreSQL composite from",
+        "row 1 is NULL in every column, row 2 is a struct whose subfields are all NULL: a reader must tell those two apart",
+        "c_list_struct row 5 holds a NULL element inside a non-NULL list, and c_struct_list row 5 a NULL list inside a non-NULL struct"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "c_struct", "arrow_type": "struct<a: int32, b: string>", "arrow_format": "+s", "nullable": true, "tier": "A", "pg_type": "composite", "composite_fields": [["a", "integer"], ["b", "text"]], "metadata": null, "expected_encoding": "json"},
+        {"name": "c_nested", "arrow_type": "struct<inner: struct<x: int32, y: string>, z: int32>", "arrow_format": "+s", "nullable": true, "tier": "A", "pg_type": "composite", "composite_fields": [["inner", "composite", [["x", "integer"], ["y", "text"]]], ["z", "integer"]], "metadata": null, "expected_encoding": "json"},
+        {"name": "c_list_struct", "arrow_type": "list<item: struct<a: int32, b: string>>", "arrow_format": "+l", "nullable": true, "tier": "A", "pg_type": "composite[]", "composite_fields": [["a", "integer"], ["b", "text"]], "metadata": null, "expected_encoding": "array"},
+        {"name": "c_struct_list", "arrow_type": "struct<arr: list<item: int32>, name: string>", "arrow_format": "+s", "nullable": true, "tier": "A", "pg_type": "composite", "composite_fields": [["arr", "integer[]"], ["name", "text"]], "metadata": null, "expected_encoding": "json"}
+      ]
+    },
+    "nested_btier": {
+      "name": "nested_btier",
+      "purpose": "A struct whose subfields are one A-tier int32 and one B-tier uint64: the column must be B tier as a whole, because there is no partial projection of a struct.",
+      "path": "data/nested_btier.lance",
+      "version": 1,
+      "rows": 4,
+      "fragments": 1,
+      "fragment_ids": [0],
+      "fragment_rows": [4],
+      "fragment_physical_rows": [4],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1],
+      "data_storage_version": "2.1",
+      "file_format_versions": ["2.1"],
+      "history": [
+        {"version": 1, "rows": 4}
+      ],
+      "expected": "expected/nested_btier.jsonl",
+      "expected_rows": 4,
+      "notes": [
+        "'ok' on its own would be A tier; the point of the fixture is that reading it anyway is not on offer",
+        "'bad' reaches uint64's maximum, which is exactly what no PG integer type can hold"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "c_struct_b", "arrow_type": "struct<ok: int32, bad: uint64>", "arrow_format": "+s", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"}
+      ]
+    },
+    "maps": {
+      "name": "maps",
+      "purpose": "map<utf8,int32> (A tier, jsonb) beside map<int32,utf8> (B tier: a non-string key would have to be stringified to become a jsonb object, which is silent distortion).",
+      "path": "data/maps.lance",
+      "version": 1,
+      "rows": 5,
+      "fragments": 2,
+      "fragment_ids": [0, 1],
+      "fragment_rows": [3, 2],
+      "fragment_physical_rows": [3, 2],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1, 1],
+      "data_storage_version": "2.2",
+      "file_format_versions": ["2.2"],
+      "history": [
+        {"version": 1, "rows": 5}
+      ],
+      "expected": "expected/maps.jsonl",
+      "expected_rows": 5,
+      "notes": [
+        "written at 2.2 because pylance 11 writes Arrow map in no other Lance file format: 2.0 and 2.1 both refuse it",
+        "an empty map (row 1/2) and a NULL map are different values, as are a present key with a NULL value (row 3) and an absent key",
+        "expected/maps.jsonl spells each map as a list of [key, value] pairs, which is the only form that survives a non-string key"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "c_map_utf8_i32", "arrow_type": "map<string, int32>", "arrow_format": "+m", "nullable": true, "tier": "A", "pg_type": "jsonb", "metadata": null, "expected_encoding": "json"},
+        {"name": "c_map_i32_utf8", "arrow_type": "map<int32, string>", "arrow_format": "+m", "nullable": true, "tier": "B", "pg_type": null, "metadata": null, "expected_encoding": "json"}
+      ]
+    },
+    "blobv2": {
+      "name": "blobv2",
+      "purpose": "A Blob v2 column beside two A-tier ones: the v2 descriptor must be refused even though all five of its children are A-tier scalars.",
+      "path": "data/blobv2.lance",
+      "version": 1,
+      "rows": 4,
+      "fragments": 2,
+      "fragment_ids": [0, 1],
+      "fragment_rows": [2, 2],
+      "fragment_physical_rows": [2, 2],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1, 1],
+      "data_storage_version": "2.2",
+      "file_format_versions": ["2.2"],
+      "history": [
+        {"version": 1, "rows": 4}
+      ],
+      "expected": "expected/blobv2.jsonl",
+      "expected_rows": 4,
+      "notes": [
+        "written at 2.2 because Blob v2 needs it: pylance 11 refuses the extension type below 2.2, and refuses the v1 lance-encoding:blob column from 2.2 on, so blob.lance and this one cannot share a storage version",
+        "reading lance registers the extension, so pyarrow resolves the field's arrow_type to extension<lance.blob.v2<BlobType>> and the ARROW:extension:name key is no longer in the field metadata; classify() accepts the tag in either place",
+        "to_table() returns {kind, position, size, blob_id, blob_uri}, not the bytes: kind 0 is inline, and size is the real payload size, so the expected file records offsets rather than data"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int32", "arrow_format": "i", "nullable": false, "tier": "A", "pg_type": "integer", "metadata": null, "expected_encoding": "int"},
+        {"name": "note", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
+        {"name": "c_blob_v2", "arrow_type": "extension<lance.blob.v2<BlobType>>", "arrow_format": "+s", "nullable": true, "tier": "B", "pg_type": null, "metadata": {"lance-encoding:blob-inline-size-threshold": "65536"}, "expected_encoding": "json"}
+      ]
     }
   }
 }

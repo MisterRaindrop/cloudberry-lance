@@ -171,6 +171,18 @@ SELECT count(*) AS coordinator_only FROM (
 SELECT count(*) AS all_segments_only FROM (
   SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps
   EXCEPT SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps_coord) d;
+-- And the same batch boundary over the map column, whose entry window is read
+-- from an offsets buffer of its own.
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("maps.lance")
+  FROM SERVER nst_files INTO lance_regress;
+ALTER FOREIGN TABLE lance_regress."maps.lance" RENAME TO nst_maps_b2;
+ALTER FOREIGN TABLE lance_regress.nst_maps_b2 OPTIONS (ADD batch_size '2');
+SELECT count(*) AS batch2_only FROM (
+  SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps_b2
+  EXCEPT SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps) d;
+SELECT count(*) AS default_only FROM (
+  SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps
+  EXCEPT SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps_b2) d;
 -- After all of that both datasets still count their rows.
 SELECT count(*) AS rows, count(c_struct) AS structs FROM lance_regress.nst;
 SELECT count(*) AS rows, count(c_map_utf8_i32) AS maps FROM lance_regress.nst_maps;

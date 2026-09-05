@@ -284,6 +284,26 @@ SELECT count(*) AS all_segments_only FROM (
 all_segments_only
 0
 (1 row)
+-- And the same batch boundary over the map column, whose entry window is read
+-- from an offsets buffer of its own.
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("maps.lance")
+  FROM SERVER nst_files INTO lance_regress;
+NOTICE:  skipping column "c_map_i32_utf8" of "maps.lance": Arrow type "+m" (map) is not supported
+DETAIL:  A map key becomes a JSON object key, so it has to be utf8 or large_utf8, not "i" (int32).
+ALTER FOREIGN TABLE lance_regress."maps.lance" RENAME TO nst_maps_b2;
+ALTER FOREIGN TABLE lance_regress.nst_maps_b2 OPTIONS (ADD batch_size '2');
+SELECT count(*) AS batch2_only FROM (
+  SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps_b2
+  EXCEPT SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps) d;
+batch2_only
+0
+(1 row)
+SELECT count(*) AS default_only FROM (
+  SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps
+  EXCEPT SELECT id, c_map_utf8_i32 FROM lance_regress.nst_maps_b2) d;
+default_only
+0
+(1 row)
 -- After all of that both datasets still count their rows.
 SELECT count(*) AS rows, count(c_struct) AS structs FROM lance_regress.nst;
 rows|structs

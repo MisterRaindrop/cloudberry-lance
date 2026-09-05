@@ -149,6 +149,15 @@ CREATE FOREIGN TABLE lance_regress.nsterr_list_scalar
   (id integer, c_list_struct lance_regress.nsterr_texts)
   SERVER nsterr_files OPTIONS (uri 'nested.lance');
 SELECT lance_regress.nsterr_report($$SELECT c_list_struct FROM lance_regress.nsterr_list_scalar$$) AS list_struct_as_composite;
+-- A composite type name that is taken by something else is an error rather
+-- than a reuse: reusing it would read the column as a type that was never
+-- built for it (DESIGN Q1).  The import creates its types in the schema it
+-- imports into, so a second schema with a type of that name in it is enough to
+-- provoke the collision without disturbing the one types_nested built.
+CREATE SCHEMA nsterr_schema;
+CREATE TYPE nsterr_schema.lance_nested_lance_c_struct AS (wrong integer);
+IMPORT FOREIGN SCHEMA fixtures LIMIT TO ("nested.lance")
+  FROM SERVER nsterr_files INTO nsterr_schema;
 -- After all of that the same backend still reads the readable columns of the
 -- same datasets, under both execution modes.
 CREATE FOREIGN TABLE lance_regress.nsterr_ok (id integer, note text)

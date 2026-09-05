@@ -14,9 +14,10 @@ mappings, foreign tables, `IMPORT FOREIGN SCHEMA` and `SELECT` all work, the
 scan runs on every segment, and the value converters cover the whole A-tier
 list — booleans, the integer family, the three float widths, the string and
 binary families, `date32`, `timestamp` in all four units with and without a
-zone, `decimal128`, `fixed_size_list<float>` embeddings and one-dimensional
-`list`s. Everything else is refused by name rather than guessed at; see
-[Types](#types).
+zone, `decimal128`, `fixed_size_list<float>` embeddings, one-dimensional
+`list`s, `struct`s as composite types that the import creates, and
+`map<utf8, ...>` as `jsonb`. Everything else is refused by name rather than
+guessed at; see [Types](#types).
 
 ## Building
 
@@ -270,7 +271,9 @@ message naming the column, the Arrow type and the declared type.
 | `decimal128(p,s)` | `numeric(p,s)` | yes |
 | `fixed_size_list<float32, N>` | `real[]` | yes |
 | `fixed_size_list<float64, N>` | `double precision[]` | yes |
-| `list<T>` where T is a scalar above | that type's one-dimensional array | yes |
+| `list<T>` where T is anything below a list | that type's one-dimensional array | yes |
+| `struct<...>` where every subfield is readable | a composite type `IMPORT FOREIGN SCHEMA` creates, named `lance_<table>_<field path>` | yes |
+| `map<utf8\|large_utf8, T>` where T is a scalar above | `jsonb` | yes |
 
 Widening is allowed only where it cannot lose anything, and a declaration that
 would cost information is refused at the start of the scan rather than turned
@@ -294,12 +297,32 @@ into a wrong value. Four rules follow from that:
   rather than a rounded result. A value outside PostgreSQL's date or timestamp
   range is an error for the same reason.
 
-Everything else is B-tier: `uint64`, `struct`, `map`, `dictionary`,
-`duration` and the interval types, `time32`/`time64`, `date64`, `decimal256`,
-`large_list`, lists of anything but a scalar, `fixed_size_binary`, the view
-types, unions — and any field carrying Lance's `lance-encoding: blob`
-metadata, whatever its Arrow type says, because the scanner returns a
-`struct{position, size}` descriptor for those rather than the bytes.
+The two nested shapes have a rule each on top of those:
+
+- **A struct is read as a whole or not at all.** Every subfield has to be
+  readable, recursively; one B-tier subfield makes the whole column B-tier, and
+  the message names it. There is no partial projection, because a composite
+  value with fields missing for reasons the user cannot see is worse than a
+  refusal. `IMPORT FOREIGN SCHEMA` creates one composite type per struct and
+  one more per level of nesting, named `lance_<table>_<field path>` in lower
+  case with everything outside `[a-z0-9_]` replaced by `_`; a nested struct's
+  path is `<parent path>_<subfield>`, and a list of structs uses the column's
+  own path. A name that is already taken is reused when the type is field for
+  field the same and is an error when it is not.
+- **A map is read as `jsonb`, and only with string keys.** A JSON object has no
+  other kind of key, so `map<int32, ...>` is refused rather than printed into
+  one, and a map whose values are themselves containers is refused rather than
+  flattened. An absent key, a key whose value is JSON `null` and an empty map
+  are three different things and stay that way.
+
+Everything else is B-tier: `uint64`, `dictionary`, `duration` and the interval
+types, `time32`/`time64`, `date64`, `decimal256`, `large_list`, lists of lists,
+`fixed_size_binary`, the view types, unions — and any field carrying Lance's
+`lance-encoding: blob` metadata, whatever its Arrow type says, because the
+scanner returns a `struct{position, size}` descriptor for those rather than the
+bytes. A Lance Blob v2 column is refused by a rule of its own for the same
+reason: what a scan returns for it is a descriptor of offsets, not the payload,
+and it is a struct of ordinary scalars that would otherwise be read as one.
 
 B-tier is loud, never silent: `IMPORT FOREIGN SCHEMA` skips the column and says
 so with a `NOTICE`, and referring to one from a hand-written foreign table is
@@ -339,6 +362,8 @@ The suites, in the order they run:
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
 | `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
 | `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
+| `types_nested` | the four struct shapes and the map column against the pylance reference output, under both execution modes and at a batch size that straddles a fragment, plus the composite types the import creates and their reuse on a second import |
+| `types_nested_errors` | the refusals: a map with non-string keys, a struct with one B-tier subfield, a Blob v2 descriptor under both execution modes, and composite declarations that do not match |
 | `sigmask` | I5, read back from `/proc`: after a scan in this backend every lance-c thread blocks the signals a backend is driven by, and the main thread does not |
 
 After the suites, the gate greps the coordinator and segment logs for the three
@@ -400,7 +425,26 @@ invariant. `docs/testing.md` has the rest, including what the numbers mean.
   `ARROW:extension:name = lance.blob.v2` reaches the scanner as a five-field
   descriptor struct (`kind`, `position`, `size`, `blob_id`, `blob_uri`) with
   the extension name stripped, and lance-c v0.1.9 exposes no call that turns a
-  descriptor back into a payload; it is refused as an unsupported struct.
+  descriptor back into a payload; it is refused by a rule of its own, which
+  since struct columns became readable is what keeps it refused.
+- **How a Blob v2 column is recognised on a scan is fragile.** The two schemas
+  differ: `lance_dataset_schema()`, which `IMPORT FOREIGN SCHEMA` and the
+  coordinator's projection check read, keeps the Arrow extension name, and that
+  half of the rule is exact. The scanner's schema does not keep it, so a scan
+  can only match the descriptor's five child names — and if Lance renames one
+  or adds a sixth, the rule stops matching, in the direction that reads the
+  descriptor as an ordinary struct and hands out file offsets as if they were
+  data. Whether the stream schema can keep the extension name is open with
+  upstream (issue #76). Today the descriptor's `position` child is `uint64`,
+  which is B-tier on its own, so the column is refused even if the name match
+  fails; that is a property of this version of the descriptor and not something
+  to depend on.
+- **A composite type created by `IMPORT FOREIGN SCHEMA` outlives the foreign
+  table.** Dropping the table does not drop the types made for its struct
+  columns — they are ordinary database objects, and PostgreSQL records no
+  dependency that would take them with it. Re-importing reuses a type whose
+  definition still matches, so the usual cycle leaves no debris; a dataset whose
+  struct has changed shape leaves the old type behind, to be dropped by hand.
 - The refusal of a nanosecond timestamp that is not a whole microsecond is
   implemented but untested: every timestamp in `test/fixtures` is
   microsecond-aligned, and the fixtures are not this package's to change.

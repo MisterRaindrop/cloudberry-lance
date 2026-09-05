@@ -90,6 +90,13 @@ SELECT id, note FROM lance_regress.nsterr_blobv2_import ORDER BY id;
 -- Under all segments the coordinator refuses it from the dataset schema, which
 -- carries the extension name; under mpp_execute 'coordinator' the refusal comes
 -- from the stream schema, where only the five child names are left.
+--
+-- What each case is worth was measured by taking the two halves of the rule out
+-- in turn: without the extension name the first case reads the descriptor as a
+-- composite, so that case is the rule's own test.  The second one is refused
+-- either way, because the descriptor's "position" child is uint64 - the detail
+-- is what tells the two refusals apart, and it is the reason the second case
+-- checks the detail rather than only the message.
 CREATE TYPE lance_regress.nsterr_blobv2 AS (kind smallint, position bigint,
                                             size bigint, blob_id integer,
                                             blob_uri text);

@@ -197,6 +197,14 @@ lance_arrow_has_blob_v2_children(const struct ArrowSchema *field)
  * struct of offsets.  It is written up in the README's Known Limits and the
  * question of keeping the extension name on the stream schema is open with
  * upstream (issue #76).
+ *
+ * Measured against lance-c v0.1.9, by taking each half out in turn and running
+ * the gate: the metadata half is what stops IMPORT declaring the column, and
+ * without it the descriptor becomes a five-field composite type in the user's
+ * schema.  The stream half is a second line of defence rather than the only
+ * one, because the descriptor's "position" child arrives as uint64, which is
+ * B-tier in its own right; that is a property of today's descriptor and not
+ * something to rely on.
  */
 static bool
 lance_arrow_is_blob_v2(const struct ArrowSchema *field)

@@ -50,21 +50,29 @@ SELECT id, (c_struct).a AS a, to_json((c_struct).b) AS b
 SELECT id, (c_struct).a AS a, encode(convert_to((c_struct).b, 'UTF8'), 'hex') AS b_utf8
   FROM lance_regress.nst WHERE id = 4;
 -- A NULL struct and a struct whose subfields are all NULL are different values,
--- and only the second one has a composite to look inside.
-SELECT id, c_struct IS NULL AS whole_null, (c_struct).a IS NULL AS a_null,
-       (c_struct).b IS NULL AS b_null
+-- and only the second one has a composite to look inside.  IS NULL cannot tell
+-- them apart - on a row value it is true when every field is null, which is SQL
+-- row semantics and not this wrapper's doing - so the text form is what says
+-- whether there is a composite there at all.
+SELECT id, c_struct::text IS NULL AS whole_null, c_struct::text AS as_text,
+       (c_struct).a IS NULL AS a_null, (c_struct).b IS NULL AS b_null
   FROM lance_regress.nst WHERE id IN (1, 2) ORDER BY id;
 -- Two levels deep: the inner struct is a composite type of its own, and its
 -- fields are reached through it.
 SELECT id, ((c_nested).inner).x AS x, to_json(((c_nested).inner).y) AS y,
        (c_nested).z AS z
   FROM lance_regress.nst ORDER BY id;
-SELECT id, (c_nested).inner IS NULL AS inner_null
+-- The same distinction one level in: row 2 has no inner struct, row 3 has one
+-- whose fields are both NULL.
+SELECT id, ((c_nested).inner)::text IS NULL AS inner_null,
+       ((c_nested).inner)::text AS inner_text
   FROM lance_regress.nst WHERE id IN (2, 3) ORDER BY id;
 -- A list of structs is an array of the composite type: an empty list is an
--- empty array, a NULL list is NULL, and a NULL element stays NULL.
+-- empty array, a NULL list is NULL, and a NULL element stays NULL.  The three
+-- empty first elements below are told apart by the count beside them: no array,
+-- an array of nothing, and an array whose first element is NULL.
 SELECT id, c_list_struct IS NULL AS null_list, cardinality(c_list_struct) AS n,
-       c_list_struct[1] IS NULL AS first_null,
+       c_list_struct[1]::text AS first,
        (c_list_struct[1]).a AS a1, to_json((c_list_struct[1]).b) AS b1,
        (c_list_struct[2]).a AS a2, to_json((c_list_struct[2]).b) AS b2
   FROM lance_regress.nst ORDER BY id;

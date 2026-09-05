@@ -118,9 +118,12 @@ CREATE FOREIGN TABLE lance_regress.nsterr_subtype
   (id integer, c_struct lance_regress.nsterr_texts)
   SERVER nsterr_files OPTIONS (uri 'nested.lance');
 SELECT lance_regress.nsterr_report($$SELECT c_struct FROM lance_regress.nsterr_subtype$$) AS wrong_subfield_type;
--- A nested struct names the whole path, not just the field it failed on.
+-- A nested struct names the whole path, not just the field it failed on.  The
+-- subfield is called "inner", which is a keyword and has to be quoted by hand
+-- here; IMPORT FOREIGN SCHEMA quotes every field name it writes, which is what
+-- lets a Lance schema use a name PostgreSQL reserves.
 CREATE TYPE lance_regress.nsterr_inner AS (x integer, y integer);
-CREATE TYPE lance_regress.nsterr_outer AS (inner lance_regress.nsterr_inner, z integer);
+CREATE TYPE lance_regress.nsterr_outer AS ("inner" lance_regress.nsterr_inner, z integer);
 CREATE FOREIGN TABLE lance_regress.nsterr_deep
   (id integer, c_nested lance_regress.nsterr_outer)
   SERVER nsterr_files OPTIONS (uri 'nested.lance');

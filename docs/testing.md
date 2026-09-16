@@ -30,10 +30,37 @@ Three kinds of check, in order of how much they prove:
 ## What the container needs before the gate can run
 
 A Cloudberry installation as built from source is not enough to run a PGXS
-extension's `make installcheck`. What follows had to be added to the test
-container, all of it taken from the Cloudberry source tree that is mounted there
-at `/opt/cloudberry` (same prefix, same configure options — anything else and
-the results would not be comparable):
+extension's `make installcheck`.
+
+**Some of what follows may already be in your image.** The list below was
+written against one image; a later `cbdb-local:rockylinux9` already carries the
+four PGXS makefiles, `pg_regress` with its Perl helpers, and all four
+extensions, so the only thing that had to be added there was the toolchain.
+Check before building any of it.
+
+What is *not* optional, and is mentioned nowhere else, is the set of
+development packages. The extension needs `openssl-devel` (the server headers
+include `common/cipher.h`) and `libicu-devel` (`utils/pg_locale.h` includes
+`unicode/ucol.h`, so anything that inspects a collation pulls it in), plus
+`libzstd-devel`, `zlib-devel` and `libcurl-devel`. lance-c needs `rust`/`cargo`
+>= 1.91 and a `protoc` **newer than the distribution's**: Rocky 9 ships 3.14,
+which refuses the substrait crate's protos with "proto3 optional fields, but
+--experimental_allow_proto3_optional was not set". The official v24.3 release
+works, and its `include/` carries the well-known types that `protobuf-compiler`
+alone does not. The suites need `diffutils` — `gpdiff.pl` shells out to `diff`
+— and `git`, because cargo fetches the lance crates with `git-fetch-with-cli`.
+
+A cluster shaped the way `gate.sh` expects is the other half. The image's own
+`init_system.sh` builds one under `/data0/database` on port 5432, which is not
+it; `gpAux/gpdemo` produces exactly the expected shape (coordinator 7000,
+primaries 7002-7004, datadirs under `/home/gpadmin/demo/datadirs`), and the
+credential check reads those paths literally. Copy gpdemo out of the mounted
+source tree before running it — that mount is read only — and turn ORCA off
+(`gpconfig -c optimizer -v off`), because the answer files are the planner's.
+
+The rest, taken from the Cloudberry source tree mounted at `/opt/cloudberry`
+(same prefix, same configure options — anything else and the results would not
+be comparable):
 
 - **`pg_config` and `psql` are not on `PATH`,** not even in the login shell of
   the user that owns the cluster. Every script that runs `make` or `psql` in the
@@ -61,11 +88,31 @@ specification "verbose|Verbose"` under perl 5.40, and `pg_regress` reports
 *"Optimizer disabled. Using planner answer files"* — which is also the honest
 statement that only the PostgreSQL planner is covered here.
 
+### Bumping third_party/lance-c
+
+`make` does not notice that the submodule moved: `liblance_c.so` is already
+there, so the recipe that builds it does not run and the gate quietly tests the
+**old** library. The symptom is a build that finishes in about a second. Pass
+`--clean` (which is `cargo clean` in the submodule) after any bump, and expect
+roughly ten minutes for the rebuild.
+
+Nothing else has to be edited. `gate.sh` reads the lance revision out of
+`third_party/lance-c/Cargo.toml` and the crates to patch out of the downloaded
+source tree, so both follow the submodule on their own.
+
 ### cargo, and why the build configuration is generated
 
-The container cannot fetch the build's inputs at any usable speed: crates.io
-comes in at ~58 KB/s and GitHub at ~30 KB/s from there, while `rsproxy.cn`
-manages 2.2 MB/s. `gate.sh` therefore generates
+**Check whether your machine needs this at all.** The scheme exists for a
+container that cannot fetch the build's inputs at any usable speed — crates.io
+at ~58 KB/s and GitHub at ~30 KB/s were what prompted it. Where the container
+does have working access (2.8 MB/s to codeload and 3.9 MB/s to rsproxy, measured
+on another host), a `.cargo/config.toml` that only replaces the crates.io
+registry, with no `[patch]` section at all, lets cargo fetch the lance crates
+straight from the revision `Cargo.toml` names — and removes any chance of
+building against the sources of a different one.
+
+Where it is needed: crates.io comes in at ~58 KB/s and GitHub at ~30 KB/s from
+such a container, while `rsproxy.cn` manages 2.2 MB/s. `gate.sh` therefore generates
 `third_party/lance-c/.cargo/config.toml` **inside the container** — it is a
 property of the machine you build on and is deliberately not in the repository —
 which replaces the crates.io source with an rsproxy sparse registry and

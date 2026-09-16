@@ -31,7 +31,15 @@ set -euo pipefail
 CONTAINER=${LANCE_GATE_CONTAINER:-cbdb-repro-1850}
 REMOTE=${LANCE_GATE_REMOTE:-/home/gpadmin/cloudberry-lance}
 LANCE_SRC_DIR=${LANCE_GATE_LANCE_SRC:-/home/gpadmin/lance-src}
-LANCE_REV=e934cc2c
+# The lance revision is a property of the submodule, not of this script: read it
+# from there so that bumping third_party/lance-c cannot leave the gate building
+# against a different version of lance than the extension asks for.  Getting
+# that wrong is silent - cargo would happily build the old sources - which is
+# why it is derived rather than written down twice.
+LANCE_REV=$(sed -n 's/.*lance = { git = "[^"]*", rev = "\([^"]*\)".*/\1/p' \
+	"$(dirname "${BASH_SOURCE[0]}")/../../third_party/lance-c/Cargo.toml" | head -1)
+[ -n "$LANCE_REV" ] ||
+	{ echo "gate: cannot read the lance rev from third_party/lance-c/Cargo.toml" >&2; exit 1; }
 QD_PORT=${LANCE_GATE_PORT:-7000}
 # gpadmin's login shell does not put pg_config/psql on PATH; the server ships the
 # environment file, so every remote script sources it first (PROBES, P1 gate).
@@ -63,29 +71,18 @@ SUITE=
 # The 21 lance crates lance-c takes from git.  The container cannot fetch them
 # at any usable speed (GitHub is ~30 KB/s from there), so cargo is pointed at a
 # source tree the host downloaded instead (PROBES, "build facts").
-LANCE_PATCH_CRATES=(
-	fsst
-	lance
-	lance-arrow
-	lance-arrow-scalar
-	lance-arrow-stats
-	lance-bitpacking
-	lance-core
-	lance-datafusion
-	lance-datagen
-	lance-derive
-	lance-encoding
-	lance-file
-	lance-geo
-	lance-index
-	lance-index-core
-	lance-io
-	lance-linalg
-	lance-namespace
-	lance-select
-	lance-table
-	lance-tokenizer
-)
+# The crates to [patch] are whatever the lance tree at this revision actually
+# contains.  They used to be listed here, and the list went stale the first time
+# LANCE_REV moved: four of the names no longer existed, so cargo failed with
+# "failed to load source for dependency fsst" on exactly the machines this
+# vendoring path exists for.  Enumerating them costs one ls.
+lance_patch_crates() {
+	remote_quiet "cd '$LANCE_SRC_DIR/lance-$LANCE_REV/rust' &&
+		for d in */Cargo.toml; do
+			sed -n 's/^name *= *\"\\(.*\\)\"/\\1/p' \"\$d\" | head -1
+		done"
+}
+
 
 die() { echo "gate: $*" >&2; exit 1; }
 say() { echo "gate: $*"; }
@@ -236,9 +233,10 @@ write_cargo_config() {
 	config+=$'[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n\n'
 	config+=$'[net]\ngit-fetch-with-cli = true\n\n'
 	config+=$'[patch."https://github.com/lance-format/lance.git"]\n'
-	for crate in "${LANCE_PATCH_CRATES[@]}"; do
+	while read -r crate; do
+		[ -n "$crate" ] || continue
 		config+="$crate = { path = \"$LANCE_SRC_DIR/lance-$LANCE_REV/rust/$crate\" }"$'\n'
-	done
+	done < <(lance_patch_crates)
 
 	say "writing $REMOTE/third_party/lance-c/.cargo/config.toml"
 	remote_quiet "mkdir -p '$REMOTE/third_party/lance-c/.cargo'"

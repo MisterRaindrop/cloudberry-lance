@@ -224,3 +224,21 @@ SELECT count(*) AS b8 FROM lance_regress.pd_t3 WHERE c_utf8 > 'z';
 SELECT count(*) AS b9 FROM lance_regress.pd_t3 WHERE c_utf8 <= 'ascii';
 SELECT count(*) AS b10 FROM lance_regress.pd_t3 WHERE c_int64 > 4;
 RESET lance_fdw.enable_filter_pushdown;
+
+-- An empty IN list never reaches the wrapper: PostgreSQL folds `= ANY('{}')`
+-- into a One-Time Filter before planning the scan, so the foreign scan does not
+-- run at all.  The deparser's own empty-array branch is unreachable from SQL and
+-- is kept only as a backstop.
+SELECT count(*) AS empty_in FROM lance_regress.pd_t3 WHERE c_int32 = ANY('{}'::int[]);
+
+-- ORCA is compiled into this server even though the answer files are the
+-- planner's.  Pushdown must not change the rows under it either.
+SET optimizer = on;
+SET lance_fdw.enable_filter_pushdown = on;
+SELECT count(*) AS orca_on_eq, sum(id) AS orca_on_sum FROM lance_regress.pd_t3 WHERE c_int32 = 0;
+SELECT count(*) AS orca_on_x, sum(id) AS orca_on_xsum FROM lance_regress.pd_t3 WHERE c_int64 > 4;
+SET lance_fdw.enable_filter_pushdown = off;
+SELECT count(*) AS orca_off_eq, sum(id) AS orca_off_sum FROM lance_regress.pd_t3 WHERE c_int32 = 0;
+SELECT count(*) AS orca_off_x, sum(id) AS orca_off_xsum FROM lance_regress.pd_t3 WHERE c_int64 > 4;
+RESET optimizer;
+RESET lance_fdw.enable_filter_pushdown;

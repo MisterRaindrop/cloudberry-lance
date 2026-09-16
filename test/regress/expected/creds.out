@@ -55,7 +55,7 @@ SELECT count(*) AS plan_lines
   FROM lance_regress.explain_lance('SELECT * FROM lance_regress.creds_t',
                                    'VERBOSE, COSTS OFF') l;
 plan_lines
-2
+3
 (1 row)
 SELECT lance_regress.capture($$SELECT count(*) FROM lance_regress.creds_t$$) AS scan_with_canary;
 scan_with_canary

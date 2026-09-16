@@ -31,6 +31,8 @@
 #include "lance_fdw.h"
 #include "lance_runtime.h"
 
+#include "utils/plancache.h"
+
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
@@ -39,6 +41,21 @@ int			lance_cpu_threads = 0;
 int			lance_io_threads = 0;
 int			lance_index_cache_mb = 64;
 int			lance_metadata_cache_mb = 32;
+bool		lance_enable_filter_pushdown = true;
+
+/*
+ * A plan built while pushdown was on has the pushed quals removed from its
+ * qual list and the filter string frozen into fdw_private.  Nothing in the
+ * relcache changes when this GUC does, so a cached generic plan would go on
+ * pushing down after SET ... = off.  This GUC is the escape hatch for a
+ * correctness problem, so it has to bite at once.
+ */
+static void
+lance_assign_enable_filter_pushdown(bool newval, void *extra)
+{
+	if (newval != lance_enable_filter_pushdown)
+		ResetPlanCache();
+}
 
 typedef enum LanceHandleKind
 {
@@ -75,6 +92,19 @@ static void lance_rt_release_callback(ResourceReleasePhase phase,
 void
 lance_rt_define_gucs(void)
 {
+	DefineCustomBoolVariable("lance_fdw.enable_filter_pushdown",
+							 "Push WHERE clauses down to Lance where the two "
+							 "systems are known to agree exactly.",
+							 "Read at planning time, so it takes effect on the "
+							 "next plan; changing it also resets the plan cache "
+							 "so that already-cached plans stop pushing down. "
+							 "Only the coordinator's value matters.",
+							 &lance_enable_filter_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, lance_assign_enable_filter_pushdown, NULL);
+
 	DefineCustomIntVariable("lance_fdw.cpu_threads",
 							"Number of CPU worker threads lance-c may use.",
 							"0 leaves lance-c at its own default, which scales "

@@ -31,10 +31,11 @@ lance_fdw|{"mpp_execute=all segments"}
 SELECT name, setting FROM pg_settings WHERE name LIKE 'lance\_fdw.%' ORDER BY name;
 name|setting
 lance_fdw.cpu_threads|0
+lance_fdw.enable_filter_pushdown|on
 lance_fdw.index_cache_size_mb|64
 lance_fdw.io_threads|0
 lance_fdw.metadata_cache_size_mb|32
-(4 rows)
+(5 rows)
 CREATE SCHEMA lance_regress;
 -- Errors that quote a path, a bucket or a lance message are not comparable
 -- across environments, so the suites that provoke them run the statement

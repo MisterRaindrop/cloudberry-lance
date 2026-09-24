@@ -152,6 +152,14 @@ extern void lance_arrow_converter_set_array(LanceConverter *conv,
 extern void lance_arrow_converter_reset(LanceConverter *conv);
 
 /*
+ * Bytes of Arrow buffer behind one converter's bound array, children and
+ * dictionary included.  Call it only on the per-column converters: a list's
+ * element converter views the same child buffers, so counting both would count
+ * them twice.
+ */
+extern int64 lance_arrow_converter_bytes(const LanceConverter *conv);
+
+/*
  * Is element `row` of the converter's current batch NULL?  `row` is an index
  * into the column, so the caller has already added the record batch's own
  * offset (the C data interface makes a struct's offset apply to its children,

@@ -21,21 +21,26 @@ SELECT pg_describe_object(d.classid, d.objid, 0) AS object
   ORDER BY 1;
 object
 foreign-data wrapper lance_fdw
+function lance_fdw_cache_stats()
 function lance_fdw_handler()
+function lance_fdw_memory()
 function lance_fdw_validator(text[],oid)
-(3 rows)
+(5 rows)
 SELECT fdwname, fdwoptions FROM pg_foreign_data_wrapper WHERE fdwname = 'lance_fdw';
 fdwname|fdwoptions
 lance_fdw|{"mpp_execute=all segments"}
 (1 row)
 SELECT name, setting FROM pg_settings WHERE name LIKE 'lance\_fdw.%' ORDER BY name;
 name|setting
+lance_fdw.batch_readahead|0
 lance_fdw.cpu_threads|0
 lance_fdw.enable_filter_pushdown|on
 lance_fdw.index_cache_size_mb|64
+lance_fdw.io_buffer_size_mb|0
 lance_fdw.io_threads|0
 lance_fdw.metadata_cache_size_mb|32
-(5 rows)
+lance_fdw.track_memory|on
+(8 rows)
 CREATE SCHEMA lance_regress;
 -- Errors that quote a path, a bucket or a lance message are not comparable
 -- across environments, so the suites that provoke them run the statement

@@ -34,6 +34,14 @@ SELECT o.opt AS table_option
 SELECT format('%s: %s', a.attname, o.opt) AS column_option
   FROM pg_attribute a, unnest(a.attfdwoptions) AS o(opt)
   WHERE a.attrelid = 'lance_regress.ddl_all'::regclass ORDER BY 1;
+-- The byte limit on its own is accepted; ALTER has to see the combination too,
+-- because the validator is handed the merged option list, not just the change.
+CREATE FOREIGN TABLE lance_regress.ddl_bytes (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'ds.lance', batch_size_bytes '1048576');
+SELECT o.opt AS bytes_option
+  FROM pg_foreign_table t, unnest(t.ftoptions) AS o(opt)
+  WHERE t.ftrelid = 'lance_regress.ddl_bytes'::regclass ORDER BY 1;
+ALTER FOREIGN TABLE lance_regress.ddl_bytes OPTIONS (ADD batch_size '128');
 -- mpp_execute may be overridden on a server and on a table.
 CREATE SERVER lance_coord_srv FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri 'file:///lance/base', mpp_execute 'coordinator');
@@ -56,6 +64,14 @@ CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', version '-1');
 CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', batch_size '0');
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size_bytes '0');
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size_bytes 'lots');
+-- lance lets a byte limit override a row limit, so taking both would ignore
+-- one of them without saying so.
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size '128', batch_size_bytes '1048576');
 CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', rows_hint 'lots');
 CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv

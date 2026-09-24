@@ -25,10 +25,12 @@
 #include "lance_runtime.h"
 #include "lance_scan.h"
 
+#include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/table.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
+#include "funcapi.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -43,6 +45,8 @@ void		_PG_init(void);
 
 PG_FUNCTION_INFO_V1(lance_fdw_handler);
 PG_FUNCTION_INFO_V1(lance_fdw_validator);
+PG_FUNCTION_INFO_V1(lance_fdw_memory);
+PG_FUNCTION_INFO_V1(lance_fdw_cache_stats);
 
 static void lanceGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 								   Oid foreigntableid);
@@ -298,4 +302,70 @@ lanceGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel,
 							NIL,	/* no custom tlist */
 							NIL,	/* no recheck quals */
 							outer_plan);
+}
+
+/*
+ * Arrow bytes this backend currently has on Cloudberry's memory ledger.
+ *
+ * Every reserve owes exactly one release, and a miscounted pair is invisible
+ * until the ledger drifts far enough to refuse an unrelated allocation.  So
+ * current_bytes is worth exposing on its own: between scans it has to be zero,
+ * and that is a property a test can assert.  peak_bytes is the high-water mark
+ * since this backend started, which is the figure to size the bounds against -
+ * the current value is nearly always zero, because a batch is held only
+ * between one IterateForeignScan and the next.
+ */
+Datum
+lance_fdw_memory(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "lance_fdw_memory: return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	values[0] = Int64GetDatum(lance_rt_vmem_reserved());
+	values[1] = Int64GetDatum(lance_rt_vmem_peak());
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * Hit and miss counters for the two per-backend lance caches.  Sizing
+ * lance_fdw.index_cache_size_mb and lance_fdw.metadata_cache_size_mb is
+ * guesswork without them.
+ */
+Datum
+lance_fdw_cache_stats(PG_FUNCTION_ARGS)
+{
+	LanceSessionCacheStats stats;
+	TupleDesc	tupdesc;
+	Datum		values[8];
+	bool		nulls[8] = {false};
+	LanceSession *session = lance_rt_session();
+	int32		rc;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "lance_fdw_cache_stats: return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (session == NULL)
+		PG_RETURN_NULL();		/* this backend has not opened a dataset yet */
+
+	memset(&stats, 0, sizeof(stats));
+	LANCE_MASKED(rc = lance_session_get_cache_stats(session, &stats));
+	LANCE_CHECK(rc == 0, NULL);
+
+	values[0] = Int64GetDatum((int64) stats.index_cache_hits);
+	values[1] = Int64GetDatum((int64) stats.index_cache_misses);
+	values[2] = Int64GetDatum((int64) stats.index_cache_entries);
+	values[3] = Int64GetDatum((int64) stats.index_cache_size_bytes);
+	values[4] = Int64GetDatum((int64) stats.metadata_cache_hits);
+	values[5] = Int64GetDatum((int64) stats.metadata_cache_misses);
+	values[6] = Int64GetDatum((int64) stats.metadata_cache_entries);
+	values[7] = Int64GetDatum((int64) stats.metadata_cache_size_bytes);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

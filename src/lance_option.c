@@ -69,6 +69,7 @@ static const LanceOptionDef lance_options[] = {
 	{"uri", ForeignTableRelationId, false},
 	{"version", ForeignTableRelationId, false},
 	{"batch_size", ForeignTableRelationId, false},
+	{"batch_size_bytes", ForeignTableRelationId, false},
 	{"rows_hint", ForeignTableRelationId, false},
 
 	{"column_name", AttributeRelationId, false},
@@ -177,6 +178,25 @@ lance_parse_batch_size(const char *name, const char *value)
 	return (int64) parsed;
 }
 
+/*
+ * A byte limit on one output batch.  lance lets this override the row limit,
+ * which is why the two may not be set together (lance_validate_options).
+ */
+static int64
+lance_parse_batch_size_bytes(const char *name, const char *value)
+{
+	char	   *endptr;
+	long long	parsed;
+
+	errno = 0;
+	parsed = strtoll(value, &endptr, 10);
+	if (errno != 0 || endptr == value || *endptr != '\0' || parsed <= 0)
+		lance_reject_value(name, value,
+						   "The batch size in bytes must be a positive integer.");
+
+	return (int64) parsed;
+}
+
 static double
 lance_parse_rows_hint(const char *name, const char *value)
 {
@@ -239,6 +259,8 @@ lance_validate_value(const LanceOptionDef *opt, DefElem *def)
 		(void) lance_parse_version(opt->name, value);
 	else if (strcmp(opt->name, "batch_size") == 0)
 		(void) lance_parse_batch_size(opt->name, value);
+	else if (strcmp(opt->name, "batch_size_bytes") == 0)
+		(void) lance_parse_batch_size_bytes(opt->name, value);
 	else if (strcmp(opt->name, "rows_hint") == 0)
 		(void) lance_parse_rows_hint(opt->name, value);
 	else if (strcmp(opt->name, "allow_http") == 0 ||
@@ -257,6 +279,8 @@ lance_validate_options(List *options_list, Oid catalog)
 {
 	ListCell   *lc;
 	bool		saw_uri = false;
+	bool		saw_batch_rows = false;
+	bool		saw_batch_bytes = false;
 
 	foreach(lc, options_list)
 	{
@@ -279,7 +303,23 @@ lance_validate_options(List *options_list, Oid catalog)
 
 		if (strcmp(def->defname, "uri") == 0)
 			saw_uri = true;
+		else if (strcmp(def->defname, "batch_size") == 0)
+			saw_batch_rows = true;
+		else if (strcmp(def->defname, "batch_size_bytes") == 0)
+			saw_batch_bytes = true;
 	}
+
+	/*
+	 * lance lets a byte limit take precedence over a row limit, so accepting
+	 * both would silently ignore one of them.  Say so instead.
+	 */
+	if (saw_batch_rows && saw_batch_bytes)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("options \"batch_size\" and \"batch_size_bytes\" cannot be used together"),
+				 errdetail("lance lets the byte limit take precedence, so "
+						   "\"batch_size\" would have no effect."),
+				 errhint("Keep whichever limit you meant.")));
 
 	if (catalog == ForeignTableRelationId && !saw_uri)
 		ereport(ERROR,
@@ -371,6 +411,9 @@ lance_get_table_options(Oid foreigntableid, LanceTableOptions *opts)
 			opts->version = lance_parse_version(def->defname, value);
 		else if (strcmp(def->defname, "batch_size") == 0)
 			opts->batch_size = lance_parse_batch_size(def->defname, value);
+		else if (strcmp(def->defname, "batch_size_bytes") == 0)
+			opts->batch_size_bytes =
+				lance_parse_batch_size_bytes(def->defname, value);
 		else if (strcmp(def->defname, "rows_hint") == 0)
 			opts->rows_hint = lance_parse_rows_hint(def->defname, value);
 		/* mpp_execute is Cloudberry's, and is handled by the planner */

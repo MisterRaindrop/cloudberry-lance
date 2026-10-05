@@ -171,7 +171,8 @@ def main(argv=None) -> int:
         client = Minio(netloc, access_key=cfg.key, secret_key=cfg.secret,
                        secure=secure, region=cfg.region)
         if not client.bucket_exists(cfg.bucket):
-            raise SystemExit("bucket %r does not exist (see WORKPLAN T4)" % cfg.bucket)
+            raise SystemExit("bucket %r does not exist; create it first, e.g. "
+                             "'mc mb <alias>/%s'" % (cfg.bucket, cfg.bucket))
 
     for name in names:
         uploads = plan_uploads(data_dir, name, prefix)

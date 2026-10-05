@@ -18,6 +18,12 @@ SELECT pg_describe_object(d.classid, d.objid, 0) AS object
   ORDER BY 1;
 SELECT fdwname, fdwoptions FROM pg_foreign_data_wrapper WHERE fdwname = 'lance_fdw';
 SELECT name, setting FROM pg_settings WHERE name LIKE 'lance\_fdw.%' ORDER BY name;
+-- The database's collation is part of the environment these suites assume.
+-- Several compare text by ordering, and their expected counts are those of a
+-- C.UTF-8 database, which orders by code point; under a linguistic locale the
+-- same query returns different rows, correctly.  Checked here, first, so that
+-- the wrong locale fails as itself rather than as a count deep in pushdown.
+SELECT datcollate, datctype FROM pg_database WHERE datname = current_database();
 CREATE SCHEMA lance_feature;
 -- Errors that quote a path, a bucket or a lance message are not comparable
 -- across environments, so the suites that provoke them run the statement

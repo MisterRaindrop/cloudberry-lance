@@ -1,0 +1,159 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Everything test/run/run.sh and test/stability/*.sh assume before they start:
+# a Cloudberry container shaped like the one the suites were written against,
+# an S3 service beside it with the bucket in place, both on one user-defined
+# network,
+# the fixture tooling installed on the host, and test/run/env.sh saying where
+# all of it is.  Both workflows call this, so the setup cannot drift between
+# the run on every push and the long weekly one.
+
+name: Cloudberry and S3 for lance_fdw
+description: Build the CI image and start the cluster and the S3 service the suites run against.
+
+inputs:
+  cloudberry-ref:
+    description: apache/cloudberry commit to build.
+    required: true
+  s3-image:
+    description: SeaweedFS image, pinned.
+    required: true
+  python-version:
+    description: Python for the fixture tooling.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The runner starts with ~20 GB free; the Cloudberry build, lance-c and the
+    # fixtures need more than that.  These are toolchains nothing here uses.
+    - name: Free disk space
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+          /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+        df -h /
+
+    - name: Check out apache/cloudberry
+      uses: actions/checkout@v5
+      with:
+        repository: apache/cloudberry
+        ref: ${{ inputs.cloudberry-ref }}
+        path: cloudberry-src
+        submodules: recursive
+
+    # getversion asks git for a version when it can; remove .git so the answer
+    # is the same as for the image the suites were written against.
+    - name: Strip git metadata from the Cloudberry source
+      shell: bash
+      run: find cloudberry-src -name .git -prune -exec rm -rf {} +
+
+    - uses: docker/setup-buildx-action@v3
+
+    # Cached by commit: a new CLOUDBERRY_REF rebuilds, anything else reuses it.
+    - name: Build the CI image
+      uses: docker/build-push-action@v6
+      with:
+        context: ci
+        file: ci/Dockerfile
+        build-contexts: cloudberry-src=cloudberry-src
+        load: true
+        tags: lance-fdw-ci:latest
+        cache-from: type=gha,scope=cloudberry-${{ inputs.cloudberry-ref }}
+        cache-to: type=gha,mode=max,scope=cloudberry-${{ inputs.cloudberry-ref }}
+
+    - name: Drop the Cloudberry source
+      shell: bash
+      run: rm -rf cloudberry-src
+
+    # The fixture Makefile looks for .venv at the repository root, as it does on
+    # a developer's machine, so CI makes one there rather than overriding PYTHON.
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install the fixture tooling
+      shell: bash
+      run: |
+        python -m venv .venv
+        .venv/bin/pip install --quiet -r test/fixtures/requirements.txt
+
+    # SeaweedFS, not MinIO: MinIO stopped publishing community images and its
+    # Docker Hub repository is gone, so a pinned tag no longer resolves.  It is
+    # started with an identity file because leak_loop asserts that a wrong
+    # secret is refused, and without one SeaweedFS accepts any credentials -
+    # that case would pass by not being tested.  The key pair exists only for
+    # the length of this job; it is not a secret and is not treated as one.
+    - name: Start the S3 service and the Cloudberry container
+      shell: bash
+      env:
+        S3_IMAGE: ${{ inputs.s3-image }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/s3"
+        printf '%s\n' '{"identities":[{"name":"lance","credentials":[{"accessKey":"lance-ci","secretKey":"lance-ci-secret"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
+          > "$RUNNER_TEMP/s3/s3.json"
+        docker network create lance-net
+        docker run -d --name lance-s3 --network lance-net -p 127.0.0.1:29000:8333 \
+          -v "$RUNNER_TEMP/s3/s3.json:/etc/seaweedfs/s3.json:ro" \
+          "$S3_IMAGE" server -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 \
+          -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+        docker run -dit --name cloudberry-lance -h cdw --network lance-net lance-fdw-ci:latest
+
+        # The S3 port itself, not the master: the gateway starts listening
+        # seconds after the master answers.  An unsigned request is refused
+        # with 403 once the identity file is in effect, so any status means
+        # listening and only 000 means nothing answered.
+        status=000
+        for _ in $(seq 60); do
+          status=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:29000/ || true)
+          [ -n "$status" ] && [ "$status" != 000 ] && break
+          sleep 1
+        done
+        if [ -z "$status" ] || [ "$status" = 000 ]; then
+          echo "::error::the SeaweedFS S3 gateway never started listening"
+          docker logs lance-s3 2>&1 | tail -50
+          exit 1
+        fi
+        echo "S3 gateway answers an unsigned GET with $status"
+
+        # "weed shell" exits 0 whatever happened, so the bucket is checked by
+        # listing it afterwards rather than by an exit code.
+        echo 's3.bucket.create -name lance-regress' |
+          docker exec -i lance-s3 weed shell -master=127.0.0.1:9333 >/dev/null 2>&1
+        if ! echo 's3.bucket.list' |
+             docker exec -i lance-s3 weed shell -master=127.0.0.1:9333 2>/dev/null |
+             grep -q lance-regress; then
+          echo "::error::SeaweedFS has no lance-regress bucket"
+          exit 1
+        fi
+
+    - name: Start the cluster
+      shell: bash
+      run: docker exec -i -u gpadmin cloudberry-lance bash < ci/start-cluster.sh
+
+    - name: Write test/run/env.sh
+      shell: bash
+      run: |
+        cat > test/run/env.sh <<'ENV'
+        export LANCE_S3_ENDPOINT_HOST=http://127.0.0.1:29000
+        export LANCE_S3_ENDPOINT_CONTAINER=http://lance-s3:8333
+        export LANCE_S3_BUCKET=lance-regress
+        export LANCE_S3_REGION=us-east-1
+        export LANCE_S3_KEY=lance-ci
+        export LANCE_S3_SECRET=lance-ci-secret
+        ENV

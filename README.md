@@ -522,8 +522,8 @@ verbatim like any other DDL.
 
 run.sh needs `test/run/env.sh` (not in the repository) to export
 `LANCE_S3_ENDPOINT_HOST`, `LANCE_S3_ENDPOINT_CONTAINER`, `LANCE_S3_BUCKET`,
-`LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET` for the MinIO the
-`s3://` cases use. It also expects a container that can run `make installcheck`
+`LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET` for the S3 service the
+`s3://` cases use (CI runs SeaweedFS; `docs/development.md` shows how). It also expects a container that can run `make installcheck`
 at all, which is more than a bare Cloudberry installation provides —
 `docs/development.md` lists what has to be there and where it comes from.
 

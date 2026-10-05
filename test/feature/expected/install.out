@@ -41,6 +41,15 @@ lance_fdw.io_threads|0
 lance_fdw.metadata_cache_size_mb|32
 lance_fdw.track_memory|on
 (8 rows)
+-- The database's collation is part of the environment these suites assume.
+-- Several compare text by ordering, and their expected counts are those of a
+-- C.UTF-8 database, which orders by code point; under a linguistic locale the
+-- same query returns different rows, correctly.  Checked here, first, so that
+-- the wrong locale fails as itself rather than as a count deep in pushdown.
+SELECT datcollate, datctype FROM pg_database WHERE datname = current_database();
+datcollate|datctype
+C.UTF-8|C.UTF-8
+(1 row)
 CREATE SCHEMA lance_feature;
 -- Errors that quote a path, a bucket or a lance message are not comparable
 -- across environments, so the suites that provoke them run the statement

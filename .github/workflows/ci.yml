@@ -1,0 +1,150 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Build lance_fdw against Cloudberry and run its suites.
+#
+# The regression job runs test/run/run.sh - the same script a developer runs
+# against their own container - so a green run here means what a green run
+# there means.  The long stability runs live in stability.yml.
+
+name: CI
+
+on:
+  push:
+    # ci/** too: a branch that changes the workflow has to be able to run it,
+    # and workflow_dispatch only offers workflows the default branch has.
+    branches: [main, develop, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # apache/cloudberry main, pinned.  Moving it rebuilds the CI image (about
+  # twenty minutes); move it on purpose, not by accident.
+  CLOUDBERRY_REF: 4717b09068dc1bf5e9697d543b0a81ca0dc6c850
+  # SeaweedFS for the s3:// cases, the same release apache/cloudberry's CI uses.
+  S3_IMAGE: chrislusf/seaweedfs:4.47
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  static:
+    name: Scripts and fixture tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Shell syntax
+        run: make check-scripts
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install the fixture tooling
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet -r test/fixtures/requirements.txt
+
+      # Regenerating the fixtures and checking them against the committed
+      # manifest and expected output is what catches the tooling drifting:
+      # a pylance that writes a different file format fails here.
+      - name: Regenerate the fixtures and check them against the reference
+        run: |
+          make -C test/fixtures gen
+          make -C test/fixtures test
+
+  regress:
+    name: Regression suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/cluster
+        with:
+          cloudberry-ref: ${{ env.CLOUDBERRY_REF }}
+          s3-image: ${{ env.S3_IMAGE }}
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # lance-c takes upwards of half an hour to build here, and the Makefile
+      # only asks whether liblance_c.so exists.  So the one file is cached,
+      # keyed by the submodule's commit: a bump changes the key and cargo runs,
+      # which is also what keeps a run from quietly testing a stale library.
+      - name: Key the lance-c build
+        id: lance-c
+        run: echo "sha=$(git rev-parse HEAD:third_party/lance-c)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore liblance_c.so
+        id: lance-c-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-cache/liblance_c.so
+          key: lance-c-${{ runner.arch }}-rocky9-${{ steps.lance-c.outputs.sha }}
+
+      - name: Put the cached liblance_c.so where the build looks
+        if: steps.lance-c-cache.outputs.cache-hit == 'true'
+        run: |
+          dest=/home/gpadmin/cloudberry-lance/third_party/lance-c/target/release
+          docker exec -u gpadmin cloudberry-lance mkdir -p "$dest"
+          docker cp ci-cache/liblance_c.so "cloudberry-lance:$dest/liblance_c.so"
+          docker exec -u root cloudberry-lance chown gpadmin:gpadmin "$dest/liblance_c.so"
+
+      - name: Build, install and run the suites
+        env:
+          LANCE_TEST_CONTAINER: cloudberry-lance
+          LANCE_TEST_PG_ENV: /usr/local/cloudberry-db/cloudberry-env.sh
+          LANCE_TEST_CARGO: direct
+        run: bash test/run/run.sh --stability
+
+      - name: Take liblance_c.so out for the cache
+        if: always() && steps.lance-c-cache.outputs.cache-hit != 'true'
+        id: lance-c-out
+        run: |
+          mkdir -p ci-cache
+          docker cp cloudberry-lance:/home/gpadmin/cloudberry-lance/third_party/lance-c/target/release/liblance_c.so \
+            ci-cache/liblance_c.so && echo "found=true" >> "$GITHUB_OUTPUT" || true
+
+      - name: Save liblance_c.so
+        if: always() && steps.lance-c-out.outputs.found == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ci-cache/liblance_c.so
+          key: lance-c-${{ runner.arch }}-rocky9-${{ steps.lance-c.outputs.sha }}
+
+      - name: Collect the regression output and server logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          docker cp cloudberry-lance:/home/gpadmin/cloudberry-lance/test/feature/regression.diffs ci-logs/ 2>/dev/null || true
+          docker cp cloudberry-lance:/home/gpadmin/cloudberry-lance/test/feature/results ci-logs/results 2>/dev/null || true
+          docker cp cloudberry-lance:/home/gpadmin/demo/datadirs/qddir/demoDataDir-1/log ci-logs/coordinator-log 2>/dev/null || true
+          docker logs lance-s3 > ci-logs/s3.log 2>&1 || true
+
+      - name: Upload the regression output and server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regress-logs
+          path: ci-logs
+          if-no-files-found: ignore

@@ -34,13 +34,17 @@ Three kinds of check, in order of how much they prove:
 
 ## What the container needs before anything can be built
 
-A Cloudberry installation as built from source is not enough to run a PGXS
-extension's `make installcheck`.
+`ci/Dockerfile` is the executable answer to this section: it builds Cloudberry
+from source with Apache Cloudberry's own CI scripts, adds the toolchain, and is
+what every CI run tests against. Building that image is the shortest way to a
+working environment; what follows explains what is in it and why.
 
-**Some of what follows may already be in your image.** The list below was
-written against one image; a later `cbdb-local:rockylinux9` already carries the
-four PGXS makefiles, `pg_regress` with its Perl helpers, and all four
-extensions, so the only thing that had to be added there was the toolchain.
+**Built from source, Cloudberry already has most of it.** Configured and built
+with `devops/build/automation/cloudberry/scripts/configure-cloudberry.sh` and
+`build-cloudberry.sh`, the install carries the four PGXS makefiles, `pg_regress`
+with its Perl helpers, and all four extensions the harness assumes. The list
+further down of things to copy in by hand was written against an image whose
+Cloudberry had been installed some other way, and applies only to one like it.
 Check before building any of it.
 
 What is *not* optional, and is mentioned nowhere else, is the set of
@@ -63,6 +67,15 @@ credential check reads those paths literally. Copy gpdemo out of the mounted
 source tree before running it — that mount is read only — and turn ORCA off
 (`gpconfig -c optimizer -v off`), because the answer files are the planner's.
 
+Initialise it under `C.UTF-8` (`LANG=C.UTF-8 LC_ALL=C.UTF-8` before
+`demo_cluster.sh`). Some suites order text, and their expected counts are those
+of a database that orders by code point: under `en_US.UTF-8`, which is what the
+upstream build image's environment says, `c_utf8 > 'z'` matches none of the
+non-ASCII values that C.UTF-8 puts after `z`. The wrapper answers correctly in
+both; only the expected output is locale-specific, and the `install` suite
+prints the collation first so that a wrong one fails as itself.
+`ci/start-cluster.sh` does all of this.
+
 The rest, taken from the Cloudberry source tree mounted at `/opt/cloudberry`
 (same prefix, same configure options — anything else and the results would not
 be comparable):
@@ -74,11 +87,11 @@ be comparable):
   `/opt/cloudberry/src/`: `lib/postgresql/pgxs/src/Makefile.global`,
   `Makefile.shlib`, `Makefile.port` and `nls-global.mk`.
 - **`pg_regress` is not installed.** It was built from
-  `/opt/cloudberry/src/test/feature/{pg_regress.c,pg_regress_main.c}` against
+  `/opt/cloudberry/src/test/regress/{pg_regress.c,pg_regress_main.c}` against
   the installed `libpgcommon.a` and `libpgport.a` and put, together with the
   Perl helpers next to it (`gpdiff.pl`, `atmsort.pm`, `explain.pm`, ...) and
   `scan_flaky_fault_injectors.sh`, into
-  `lib/postgresql/pgxs/src/test/feature/`.
+  `lib/postgresql/pgxs/src/test/regress/`.
 - **Four extensions the harness assumes.** Cloudberry's `pgxs.mk` adds
   `--load-extension=gp_inject_fault` to `installcheck` (because the server was
   configured with `--enable-debug-extensions`), and its `pg_regress`
@@ -169,7 +182,7 @@ make -C test/fixtures gen GEN_FLAGS=--with-big          # ~1.5 GB, not determini
 make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
 ```
 
-### MinIO, and how the container reaches it
+### The S3 service, and how the container reaches it
 
 The `s3://` cases need an S3 service, and `test/run/env.sh` - not in the
 repository, since it carries credentials - says where it is. It names the
@@ -179,25 +192,45 @@ endpoint twice, because two different machines talk to it:
 inside the Cloudberry container. Alongside those it exports
 `LANCE_S3_BUCKET`, `LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET`.
 
-Run MinIO as a container and put it on a user-defined network with the
-Cloudberry container, then address it by name:
+CI uses SeaweedFS, and so should a new setup: MinIO no longer publishes
+community images, and its Docker Hub repository is gone. Start it with an
+identity file - without one it accepts any credentials, and the case that
+asserts a wrong secret is refused would pass by not being tested - and put it
+on a user-defined network with the Cloudberry container:
 
 ```sh
+printf '%s\n' '{"identities":[{"name":"lance","credentials":[{"accessKey":"KEY","secretKey":"SECRET"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > s3.json
 docker network create lance-net
-docker network connect lance-net lance-minio
+docker run -d --name lance-s3 --network lance-net -p 127.0.0.1:29000:8333 \
+  -v "$PWD/s3.json:/etc/seaweedfs/s3.json:ro" chrislusf/seaweedfs:4.47 \
+  server -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3 -s3.port=8333 \
+  -s3.config=/etc/seaweedfs/s3.json
 docker network connect lance-net cloudberry-lance
+echo 's3.bucket.create -name lance-regress' |
+  docker exec -i lance-s3 weed shell -master=127.0.0.1:9333
 # in test/run/env.sh:
-export LANCE_S3_ENDPOINT_CONTAINER=http://lance-minio:9000
+#   LANCE_S3_ENDPOINT_HOST=http://127.0.0.1:29000
+#   LANCE_S3_ENDPOINT_CONTAINER=http://lance-s3:8333
 ```
 
-Two other choices look simpler and are each wrong for their own reason.
-`host.docker.internal` leaves the Docker VM and comes back in through Docker
-Desktop's host networking; the 1.5 GB `big` fixture overran that path's
-buffers (`write unixgram: no buffer space available`) and took the whole
-daemon down with it. The default bridge address keeps the traffic inside the
-VM, but the default bridge has no DNS, so the address is whatever Docker
-handed out and moves when either container is recreated. A user-defined
-network has neither problem.
+An existing MinIO container works the same way, addressed by its name on the
+network. Two other ways of reaching the service look simpler and are each wrong
+for their own reason. `host.docker.internal` leaves the Docker VM and comes back
+in through Docker Desktop's host networking; the 1.5 GB `big` fixture overran
+that path's buffers (`write unixgram: no buffer space available`) and took the
+whole daemon down with it. The default bridge address keeps the traffic inside
+the VM, but the default bridge has no DNS, so the address is whatever Docker
+handed out and moves when either container is recreated - it moved on the
+first Docker restart after it was tried.
+
+### cargo: mirror or direct
+
+`LANCE_TEST_CARGO` says how cargo gets lance-c's dependencies. `mirror`, the
+default, is the scheme described above for a container whose own network
+cannot fetch them; `direct` replaces and patches nothing and lets cargo fetch
+from crates.io and GitHub, which is what CI uses. Either way the configuration
+is rewritten on every run, so it always matches the lance revision the
+submodule pins.
 
 ## The stability scripts
 
@@ -313,6 +346,49 @@ Two details worth knowing before changing the script: all three runs read the
 same `fixed.sql` from the same path, because psql prints the script name and
 line number in front of every message; and each run has to show the external
 table's row before it counts, since two empty outputs also compare equal.
+
+## Continuous integration
+
+Two workflows, both on GitHub Actions.
+
+**`ci.yml`** runs on every push to `main` and `develop` and on every pull
+request. Its `static` job checks shell syntax and regenerates the fixtures from
+scratch with the versions `test/fixtures/requirements.txt` pins, then checks
+them against the committed manifest and expected output - which is how a pylance
+that writes a different file format gets caught. Its `regress` job runs the same
+`test/run/run.sh --stability` a developer runs, against a container built from
+`ci/Dockerfile`, with `LANCE_TEST_CARGO=direct`.
+
+**`stability.yml`** runs the three stability scripts in full - a thousand
+leak_loop rounds, fifty cancel_loop rounds over the 1.5 GB `big` fixture -
+weekly and on demand (Actions → Stability → Run workflow). They take the better
+part of an hour, which is why a push only dry-runs them.
+
+Both start their environment through `.github/actions/cluster`: the image, a
+SeaweedFS and the Cloudberry container on `lance-net`, the cluster from
+`ci/start-cluster.sh`, and a `test/run/env.sh` for that one job. Two caches keep
+a run short. The image is cached per Cloudberry commit, so the build that takes
+about twenty minutes happens once per `CLOUDBERRY_REF`. And `liblance_c.so` is
+cached per lance-c submodule commit: the Makefile only asks whether that file
+exists, so restoring it skips cargo entirely, and keying it by the submodule
+means a bump always rebuilds rather than testing the old library.
+
+To move to a newer Cloudberry, change `CLOUDBERRY_REF` in both workflows. To
+reproduce CI on your own machine, build the image from a checkout of that
+commit with its `.git` removed, start it with `-h cdw`, run
+`ci/start-cluster.sh` in it, and point `run.sh` at it with
+`LANCE_TEST_CONTAINER`:
+
+```sh
+docker buildx build --load -f ci/Dockerfile \
+  --build-context cloudberry-src=<cloudberry checkout without .git> \
+  -t lance-fdw-ci ci
+docker run -dit --name ci-cloudberry -h cdw --network lance-net lance-fdw-ci
+docker exec -i -u gpadmin ci-cloudberry bash < ci/start-cluster.sh
+LANCE_TEST_CONTAINER=ci-cloudberry \
+LANCE_TEST_PG_ENV=/usr/local/cloudberry-db/cloudberry-env.sh \
+  bash test/run/run.sh
+```
 
 ## What none of this covers
 

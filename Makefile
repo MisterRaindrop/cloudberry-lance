@@ -22,7 +22,7 @@
 #   make installcheck     run the pg_regress suites against a running cluster
 #   make check-syntax     gcc -fsyntax-only over src/*.c; needs no cluster and
 #                         no pg_config, only a configured server header tree
-#   make check-scripts    bash -n over test/run/*.sh and test/stability/*.sh
+#   make check-scripts    bash -n over ci/*.sh, test/run/*.sh and test/stability/*.sh
 #   make clean-lance-c    cargo clean in the submodule (a rebuild costs ~16 min)
 #
 # lance-c is built from the pinned submodule by default.  To use one that is
@@ -139,7 +139,7 @@ check-syntax:
 .PHONY: check-scripts
 check-scripts:
 	@set -e; \
-	for f in test/run/*.sh test/stability/*.sh; do \
+	for f in ci/*.sh test/run/*.sh test/stability/*.sh; do \
 		echo "  BASH -n  $$f"; \
 		bash -n $$f; \
 	done; \

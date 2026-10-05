@@ -38,6 +38,14 @@
 #   LANCE_TEST_CONTAINER   container name             (default cbdb-repro-1850)
 #   LANCE_TEST_REMOTE      path inside the container  (default
 #                          /home/gpadmin/cloudberry-lance)
+#   LANCE_TEST_CARGO       how cargo gets lance-c's dependencies:
+#                          mirror (default) - crates.io through rsproxy.cn and
+#                            the lance crates from a source tree the host
+#                            downloads, for a container whose own network
+#                            cannot fetch them at a usable speed;
+#                          direct - crates.io and GitHub straight, nothing
+#                            patched, for CI and any machine with a working
+#                            network.
 #   test/run/env.sh       MinIO endpoint, bucket, region and credentials; not
 #                          in the repository, sourced here and passed to the
 #                          regression suites through PGOPTIONS.
@@ -57,6 +65,11 @@ LANCE_REV=$(sed -n 's/.*lance = { git = "[^"]*", rev = "\([^"]*\)".*/\1/p' \
 [ -n "$LANCE_REV" ] ||
 	{ echo "run.sh: cannot read the lance rev from third_party/lance-c/Cargo.toml" >&2; exit 1; }
 QD_PORT=${LANCE_TEST_PORT:-7000}
+CARGO_MODE=${LANCE_TEST_CARGO:-mirror}
+case "$CARGO_MODE" in
+	mirror|direct) ;;
+	*) echo "run.sh: LANCE_TEST_CARGO is '$CARGO_MODE'; it must be mirror or direct" >&2; exit 1 ;;
+esac
 # gpadmin's login shell does not put pg_config/psql on PATH; the server ships the
 # environment file, so every remote script sources it first (PROBES, P1).
 PG_ENV=${LANCE_TEST_PG_ENV:-/usr/local/cloudberry-db/greenplum_path.sh}
@@ -92,10 +105,17 @@ SUITE=
 # LANCE_REV moved: four of the names no longer existed, so cargo failed with
 # "failed to load source for dependency fsst" on exactly the machines this
 # vendoring path exists for.  Enumerating them costs one ls.
+#
+# Each line is "<crate name> <directory>", because the two are not always the
+# same: at ab6b5bbe the crates lance-arrow-scalar and lance-arrow-stats live in
+# arrow-scalar/ and arrow-stats/.  Patching by name alone pointed cargo at
+# directories that do not exist, and a container whose config predated the
+# split never regenerated it, so only a fresh one could see the failure.
 lance_patch_crates() {
 	remote_quiet "cd '$LANCE_SRC_DIR/lance-$LANCE_REV/rust' &&
 		for d in */Cargo.toml; do
-			sed -n 's/^name *= *\"\\(.*\\)\"/\\1/p' \"\$d\" | head -1
+			name=\$(sed -n 's/^name *= *\"\\(.*\\)\"/\\1/p' \"\$d\" | head -1)
+			echo \"\$name \${d%/Cargo.toml}\"
 		done"
 }
 
@@ -243,15 +263,15 @@ sync_tree() {
 # ---------------------------------------------------------------------------
 write_cargo_config() {
 	local config
-	local crate
+	local crate dir
 
 	config=$'[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n'
 	config+=$'[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n\n'
 	config+=$'[net]\ngit-fetch-with-cli = true\n\n'
 	config+=$'[patch."https://github.com/lance-format/lance.git"]\n'
-	while read -r crate; do
-		[ -n "$crate" ] || continue
-		config+="$crate = { path = \"$LANCE_SRC_DIR/lance-$LANCE_REV/rust/$crate\" }"$'\n'
+	while read -r crate dir; do
+		[ -n "$crate" ] && [ -n "$dir" ] || continue
+		config+="$crate = { path = \"$LANCE_SRC_DIR/lance-$LANCE_REV/rust/$dir\" }"$'\n'
 	done < <(lance_patch_crates)
 
 	say "writing $REMOTE/third_party/lance-c/.cargo/config.toml"
@@ -283,14 +303,29 @@ fetch_lance_source() {
 		rmdir '$LANCE_SRC_DIR/.incoming'"
 }
 
+# direct: nothing replaced and nothing patched, so cargo fetches every crate
+# from the revision Cargo.toml names.  Written every run, like the mirror one,
+# so that switching modes in one container cannot leave the other's in place.
+write_direct_cargo_config() {
+	say "writing $REMOTE/third_party/lance-c/.cargo/config.toml (direct)"
+	remote_quiet "mkdir -p '$REMOTE/third_party/lance-c/.cargo'"
+	printf '[net]\ngit-fetch-with-cli = true\n' |
+		docker exec -i -u gpadmin "$CONTAINER" \
+			tee "$REMOTE/third_party/lance-c/.cargo/config.toml" >/dev/null
+}
+
 ensure_cargo_inputs() {
+	if [ "$CARGO_MODE" = direct ]; then
+		write_direct_cargo_config
+		return 0
+	fi
 	if ! remote_quiet "test -d '$LANCE_SRC_DIR/lance-$LANCE_REV/rust'" 2>/dev/null; then
 		remote_quiet "mkdir -p '$LANCE_SRC_DIR'"
 		fetch_lance_source
 	fi
-	if ! remote_quiet "test -s '$REMOTE/third_party/lance-c/.cargo/config.toml'" 2>/dev/null; then
-		write_cargo_config
-	fi
+	# Regenerated every run: the crate list follows LANCE_REV, and a config
+	# written for an earlier revision keeps pointing at the old layout.
+	write_cargo_config
 }
 
 # ---------------------------------------------------------------------------
@@ -304,9 +339,14 @@ build_and_test() {
 	fi
 
 	remote "
-export PATH=/usr/local/toolchain/bin:\$PATH
-export CC=/usr/local/toolchain/bin/gcc
-export CXX=/usr/local/toolchain/bin/g++
+# Some images carry a newer gcc under /usr/local/toolchain because their system
+# one (4.8.5) cannot build PostgreSQL 16; others, such as the Rocky 9 image CI
+# builds on, ship gcc 11 as the system compiler and have no toolchain at all.
+if [ -x /usr/local/toolchain/bin/gcc ]; then
+	export PATH=/usr/local/toolchain/bin:\$PATH
+	export CC=/usr/local/toolchain/bin/gcc
+	export CXX=/usr/local/toolchain/bin/g++
+fi
 export PGPORT=\$QD_PORT
 
 cd \"\$REMOTE\"
@@ -429,7 +469,7 @@ run_stability() {
 	env "${common[@]}" bash "$ROOT/test/stability/noregress.sh"
 }
 
-say "container=$CONTAINER remote=$REMOTE suites='$SUITES' stability=$DO_STABILITY"
+say "container=$CONTAINER remote=$REMOTE cargo=$CARGO_MODE suites='$SUITES' stability=$DO_STABILITY"
 prepare_fixtures
 sync_tree
 sync_fixtures

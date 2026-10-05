@@ -120,18 +120,24 @@ lance_import_one(ImportForeignSchemaStmt *stmt, ForeignServer *server,
 	char	   *uri = lance_resolve_uri(base_uri, name);
 	LanceDataset *dataset;
 	LanceHandle *handle;
+	LanceSession *session;
 	struct ArrowSchema schema;
 	StringInfoData buf;
+	int32		rc;
 
-	dataset = lance_dataset_open_with_session(uri,
-											  (const char *const *) storage_opts,
-											  0,
-											  lance_rt_session());
+	/* Brings the runtime up, and may ereport: outside the masked call. */
+	session = lance_rt_session();
+
+	LANCE_MASKED(dataset = lance_dataset_open_with_session(uri,
+														   (const char *const *) storage_opts,
+														   0,
+														   session));
 	LANCE_CHECK(dataset != NULL, uri);
 	handle = lance_rt_track_dataset(dataset);
 
 	memset(&schema, 0, sizeof(schema));
-	LANCE_CHECK(lance_dataset_schema(dataset, &schema) == 0, uri);
+	LANCE_MASKED(rc = lance_dataset_schema(dataset, &schema));
+	LANCE_CHECK(rc == 0, uri);
 
 	initStringInfo(&buf);
 
@@ -142,7 +148,7 @@ lance_import_one(ImportForeignSchemaStmt *stmt, ForeignServer *server,
 	PG_FINALLY();
 	{
 		if (schema.release != NULL)
-			schema.release(&schema);
+			LANCE_MASKED(schema.release(&schema));
 	}
 	PG_END_TRY();
 

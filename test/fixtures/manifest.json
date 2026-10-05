@@ -625,6 +625,33 @@
         {"name": "note", "arrow_type": "string", "arrow_format": "u", "nullable": true, "tier": "A", "pg_type": "text", "metadata": null, "expected_encoding": "text"},
         {"name": "c_blob_v2", "arrow_type": "extension<lance.blob.v2<BlobType>>", "arrow_format": "+s", "nullable": true, "tier": "B", "pg_type": null, "metadata": {"lance-encoding:blob-inline-size-threshold": "65536"}, "expected_encoding": "json"}
       ]
+    },
+    "big": {
+      "name": "big",
+      "purpose": "AC5 wall-time comparison only: 3 fragments of 512 rows x 1048576 bytes. Random payloads, no expected output.",
+      "path": "data/big.lance",
+      "version": 1,
+      "rows": 1536,
+      "fragments": 3,
+      "fragment_ids": [0, 1, 2],
+      "fragment_rows": [512, 512, 512],
+      "fragment_physical_rows": [512, 512, 512],
+      "fragments_with_deletion_file": [],
+      "data_files_per_fragment": [1, 1, 1],
+      "data_storage_version": "2.1",
+      "file_format_versions": ["2.1"],
+      "history": [
+        {"version": 1, "rows": 1536}
+      ],
+      "expected": null,
+      "expected_rows": null,
+      "notes": [
+        "random payload: this dataset is exempt from the byte-identical regeneration requirement"
+      ],
+      "schema": [
+        {"name": "id", "arrow_type": "int64", "arrow_format": "l", "nullable": false, "tier": "A", "pg_type": "bigint", "metadata": null, "expected_encoding": null},
+        {"name": "payload", "arrow_type": "large_binary", "arrow_format": "Z", "nullable": true, "tier": "A", "pg_type": "bytea", "metadata": null, "expected_encoding": null}
+      ]
     }
   }
 }

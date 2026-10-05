@@ -1,6 +1,6 @@
 """Shared state for the fixture tests.
 
-The tests run against the datasets in ``data/``, which is gitignored: the gate
+The tests run against the datasets in ``data/``, which is gitignored: run.sh
 regenerates it.  So the session fixtures below generate anything that is
 missing before the first test looks at it.
 """

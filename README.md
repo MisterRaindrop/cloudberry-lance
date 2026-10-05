@@ -71,7 +71,7 @@ Other targets:
 | Target | What it does |
 |---|---|
 | `make check-syntax` | `gcc -fsyntax-only` over `src/*.c`; needs no server installation, only a configured source tree in `PG_INCLUDE_DIR` (default `/opt/cloudberry/src/include`) |
-| `make check-scripts` | `bash -n` over `test/gate/*.sh` and `test/stress/*.sh` |
+| `make check-scripts` | `bash -n` over `test/run/*.sh` and `test/stability/*.sh` |
 | `make installcheck` | the pg_regress suites; see "Testing" |
 | `make clean-lance-c` | `cargo clean` in the submodule; deliberately not part of `make clean` |
 
@@ -80,7 +80,7 @@ Other targets:
 The cargo build needs crates.io and, for the Lance crates lance-c takes from
 git, GitHub. Where those are slow or blocked, put a `.cargo/config.toml` in
 `third_party/lance-c/` that replaces the registry and points the git
-dependencies at a local source tree — `test/gate/gate.sh` generates exactly
+dependencies at a local source tree — `test/run/run.sh` generates exactly
 such a file for the test container, and its `write_cargo_config` function is
 the worked example. That file is not part of the repository: it is a property
 of the machine you build on.
@@ -257,7 +257,7 @@ Credentials are read from the user mapping in whichever process needs them.
 error messages. The one place they do appear is the `CREATE USER MAPPING`
 statement itself, which PostgreSQL echoes into the server log like any other
 DDL when `log_statement` is `ddl` or `all`. No wrapper can prevent that, and
-the gate's credential check allows exactly that one line and nothing else.
+run.sh's credential check allows exactly that one line and nothing else.
 
 **Foreign table**
 
@@ -482,15 +482,15 @@ dependency; naming the datasets is the honest version of that.
 ## Testing
 
 `test/fixtures/` generates the Lance datasets the suites read, using pylance on
-the host; `test/regress/` holds the pg_regress suites; `test/gate/gate.sh`
+the host; `test/feature/` holds the pg_regress suites; `test/run/run.sh`
 bridges the two into the Cloudberry container, since the repository is not
 mounted there:
 
 ```sh
-bash test/gate/gate.sh                    # everything
-bash test/gate/gate.sh --suite scan_core  # one suite, behind install
-bash test/gate/gate.sh --clean            # after a build-system change
-bash test/gate/reset.sh                   # drop schema lance_regress, re-upload fixtures
+bash test/run/run.sh                    # everything
+bash test/run/run.sh --suite scan_core  # one suite, behind install
+bash test/run/run.sh --clean            # after a build-system change
+bash test/run/reset.sh                   # drop schema lance_feature, re-upload fixtures
 ```
 
 The suites, in the order they run:
@@ -507,7 +507,7 @@ The suites, in the order they run:
 | `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
 | `pushdown` | every qualifier shape that goes down and every one that does not, each against the same query with `enable_filter_pushdown` off; the collation and encoding conditions on `text`; that `timestamptz` is refused; and that a cached generic plan stops pushing down the moment the GUC is set |
 | `pushdown_errors` | a qualifier naming a column the dataset does not have, a B-tier column reached only through a qualifier, and `column_name` mapping inside a filter |
-| `creds` | none of the three user mapping credentials is in a plan; the gate then greps the server logs for all three |
+| `creds` | none of the three user mapping credentials is in a plan; run.sh then greps the server logs for all three |
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
 | `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
 | `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
@@ -515,24 +515,24 @@ The suites, in the order they run:
 | `types_nested_errors` | the refusals: a map with non-string keys, a struct with one B-tier subfield, a Blob v2 descriptor under both execution modes, and composite declarations that do not match |
 | `sigmask` | I5, read back from `/proc`: after a scan in this backend every lance-c thread blocks the signals a backend is driven by, and the main thread does not |
 
-After the suites, the gate greps the coordinator and segment logs for the three
+After the suites, run.sh greps the coordinator and segment logs for the three
 fake credentials the `creds` suite puts in a user mapping. The only line allowed to
 contain it is the `CREATE USER MAPPING` statement itself, which the server logs
 verbatim like any other DDL.
 
-The gate needs `test/gate/env.sh` (not in the repository) to export
+run.sh needs `test/run/env.sh` (not in the repository) to export
 `LANCE_S3_ENDPOINT_HOST`, `LANCE_S3_ENDPOINT_CONTAINER`, `LANCE_S3_BUCKET`,
 `LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET` for the MinIO the
 `s3://` cases use. It also expects a container that can run `make installcheck`
 at all, which is more than a bare Cloudberry installation provides —
-`docs/testing.md` lists what has to be there and where it comes from.
+`docs/development.md` lists what has to be there and where it comes from.
 
-### Stress and control scripts
+### Stability and control scripts
 
-`test/stress/` holds three scripts that are not part of the gate, because what
+`test/stability/` holds three scripts that are not part of a normal run, because what
 they are about is behaviour under repetition and comparison rather than the
 result of one query. Each one is a host-side driver that streams its body into
-the container, the same bridge `gate.sh` uses.
+the container, the same bridge `run.sh` uses.
 
 | Script | What it asserts |
 |---|---|
@@ -541,10 +541,10 @@ the container, the same bridge `gate.sh` uses.
 | `noregress.sh` | A fixed SQL script with no Lance in it — distributed tables, a cross-segment join, an external web table through `gp_exttable_fdw`, an `EXPLAIN` — produces byte-identical output with the extension absent, installed, and installed after a scan. |
 
 ```sh
-bash test/stress/cancel_loop.sh --rounds 50 --dataset big
-bash test/stress/leak_loop.sh --rounds 1000
-bash test/stress/noregress.sh
-bash test/gate/gate.sh --stress          # after the suites, dry-run all three
+bash test/stability/cancel_loop.sh --rounds 50 --dataset big
+bash test/stability/leak_loop.sh --rounds 1000
+bash test/stability/noregress.sh
+bash test/run/run.sh --stability       # after the suites, dry-run all three
 ```
 
 `--help` on any of them lists its options. The `big` fixture the cancellation
@@ -557,10 +557,10 @@ make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
 
 `--dataset large_text` runs the same loop against a 1 MiB dataset instead, which
 exercises the script rather than the wrapper: a scan that small can finish
-before the interrupt reaches it. `gate.sh --stress` uses exactly that, with two
-rounds, twenty leak rounds and one `noregress` pass, so that a gate catches a
-stress script that has stopped working without pretending to have proved the
-invariant. `docs/testing.md` has the rest, including what the numbers mean.
+before the interrupt reaches it. `run.sh --stability` uses exactly that, with two
+rounds, twenty leak rounds and one `noregress` pass, so that a run catches a
+stability script that has stopped working without pretending to have proved the
+invariant. `docs/development.md` has the rest, including what the numbers mean.
 
 ## Known limits
 

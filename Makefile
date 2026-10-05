@@ -5,7 +5,7 @@
 #   make installcheck     run the pg_regress suites against a running cluster
 #   make check-syntax     gcc -fsyntax-only over src/*.c; needs no cluster and
 #                         no pg_config, only a configured server header tree
-#   make check-scripts    bash -n over test/gate/*.sh and test/stress/*.sh
+#   make check-scripts    bash -n over test/run/*.sh and test/stability/*.sh
 #   make clean-lance-c    cargo clean in the submodule (a rebuild costs ~16 min)
 #
 # lance-c is built from the pinned submodule by default.  To use one that is
@@ -16,7 +16,7 @@
 #   make USE_PKGCONFIG_LANCE_C=1                     (ask pkg-config for lance-c)
 #
 # The cargo build needs Rust >= 1.91, protoc and access to a crates registry;
-# see README.md.  test/gate/gate.sh prepares all of that inside the container.
+# see README.md.  test/run/run.sh prepares all of that inside the container.
 
 # check-syntax / check-scripts are defined before PGXS is included, so name the
 # default goal explicitly or `make` would run the syntax check instead of building.
@@ -36,15 +36,15 @@ OBJS = \
 	src/lance_dispatch.o \
 	src/lance_scan.o \
 	src/lance_import.o \
-	vendor/nanoarrow/src/nanoarrow.o
+	third_party/nanoarrow/src/nanoarrow.o
 
-# "install" first: it creates the extension and the lance_regress schema every
-# other suite builds on.  test/gate/gate.sh keeps the same list.
+# "install" first: it creates the extension and the lance_feature schema every
+# other suite builds on.  test/run/run.sh keeps the same list.
 REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
 	pushdown pushdown_errors \
 	creds errors_scan types types_errors types_nested types_nested_errors \
 	sigmask
-REGRESS_OPTS = --inputdir=test/regress --outputdir=test/regress
+REGRESS_OPTS = --inputdir=test/feature --outputdir=test/feature
 
 # ---------------------------------------------------------------------------
 # Where lance-c comes from
@@ -96,7 +96,7 @@ else
 LANCE_C_RPATH = $(LANCE_C_LIBDIR)
 endif
 
-PG_CPPFLAGS += -I$(LANCE_C_INCDIR) -Ivendor/nanoarrow/include -Isrc
+PG_CPPFLAGS += -I$(LANCE_C_INCDIR) -Ithird_party/nanoarrow/include -Isrc
 SHLIB_LINK += -L$(LANCE_C_LIBDIR) -llance_c -Wl,-rpath,$(LANCE_C_RPATH) -lpthread
 
 # ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ SHLIB_LINK += -L$(LANCE_C_LIBDIR) -llance_c -Wl,-rpath,$(LANCE_C_RPATH) -lpthrea
 
 SYNTAX_CC ?= gcc
 PG_INCLUDE_DIR ?= /opt/cloudberry/src/include
-SYNTAX_INCLUDES = -I$(PG_INCLUDE_DIR) -I$(LANCE_C_INCDIR) -Ivendor/nanoarrow/include -Isrc
+SYNTAX_INCLUDES = -I$(PG_INCLUDE_DIR) -I$(LANCE_C_INCDIR) -Ithird_party/nanoarrow/include -Isrc
 SYNTAX_CFLAGS ?= -fsyntax-only -Wall -Wno-unused-parameter
 
 .PHONY: check-syntax
@@ -117,12 +117,12 @@ check-syntax:
 	done; \
 	echo "check-syntax: all sources parse"
 
-# The gate and stress scripts cannot run here (no docker, no cluster), so the
+# The run and stability scripts cannot run here (no docker, no cluster), so the
 # most this host can do is parse them.
 .PHONY: check-scripts
 check-scripts:
 	@set -e; \
-	for f in test/gate/*.sh test/stress/*.sh; do \
+	for f in test/run/*.sh test/stability/*.sh; do \
 		echo "  BASH -n  $$f"; \
 		bash -n $$f; \
 	done; \
@@ -183,7 +183,7 @@ ifeq ($(LANCE_C_BUNDLED),yes)
 endif
 
 # Deliberately not wired into `clean`: rebuilding lance-c costs a quarter of an
-# hour, and `make clean` is expected to be cheap.  test/gate/gate.sh --clean
+# hour, and `make clean` is expected to be cheap.  test/run/run.sh --clean
 # asks for this one explicitly.
 clean-lance-c:
 	cd $(LANCE_C_DIR) && $(CARGO) clean

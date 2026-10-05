@@ -193,11 +193,15 @@ Fifty rounds, one session, one backend. Odd rounds are interrupted by
 connection. The scan is `sum(pg_column_size(t))` over the whole table, because a
 whole-row reference is what makes the wrapper read every column.
 
-How long a scan runs before being interrupted is calibrated: the script times
-one uninterrupted scan and then interrupts halfway into it, or, if that scan
-outlives `--calibration-deadline`, cancels it and interrupts 2 s into each round
-instead. That is what lets the same script run against the 1.5 GB `big` fixture
-and against a 1 MiB one.
+How long a scan runs before being interrupted is calibrated: the script runs one
+scan to warm lance's caches, times a second one, and then interrupts halfway
+into each round; if a calibration scan outlives `--calibration-deadline` it is
+cancelled and each round is interrupted 2 s in instead. That is what lets the
+same script run against the 1.5 GB `big` fixture and against a 1 MiB one. The
+warm-up is not a nicety: the rounds all run warm, and against MinIO over the
+docker bridge the first scan of `big` took 1366 ms while every scan after it
+finished in under 683 ms, so timing the cold one put the interrupt after the end
+of the round and 49 of 50 rounds asserted nothing.
 
 What it asserts, and what to record:
 

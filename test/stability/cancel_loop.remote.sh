@@ -108,6 +108,19 @@ classify() {
 	fi
 }
 
+# The calibration scan is still running when its deadline passes: cancel it to
+# get the session back - which is itself one cancellation of a scan in flight -
+# and interrupt well inside a scan that long.
+calibration_too_slow() {
+	say "still running after ${CAL_DEADLINE}s; cancelling to get the session back"
+	backend_signal "$SESS_PID" cancel >/dev/null
+	session_mark "$DEADLINE" ||
+		die "the session did not come back within ${DEADLINE}s after the calibration cancel"
+	DELAY_MS=$LONG_DELAY_MS
+	CAL_NOTE="an uninterrupted scan takes longer than ${CAL_DEADLINE}s"
+	say "$CAL_NOTE; interrupting ${DELAY_MS} ms into each round"
+}
+
 calibrate() {
 	local t0 elapsed
 
@@ -117,28 +130,36 @@ calibrate() {
 		return 0
 	fi
 
+	# Two scans, and it is the second that is timed.  Every round below runs
+	# with lance's metadata cache already filled and the object store's own
+	# caches warm, so halving the *first* scan of a session measures something
+	# the rounds never experience.  How wrong that is depends on how fast the
+	# store is: against MinIO over the docker bridge the first scan of the big
+	# fixture took 1366 ms and every scan after it under 683 ms, so the
+	# interrupt arrived after the round had already finished and 49 of 50
+	# rounds tested nothing.
+	say "warming up with one scan of $DATASET (up to ${CAL_DEADLINE}s)"
+	session_send "$SCAN_SQL"
+	if ! session_mark "$CAL_DEADLINE"; then
+		calibration_too_slow
+		return 0
+	fi
+
 	say "timing one uninterrupted scan of $DATASET (up to ${CAL_DEADLINE}s)"
 	t0=$(now_ms)
 	session_send "$SCAN_SQL"
-	if session_mark "$CAL_DEADLINE"; then
-		elapsed=$(( $(now_ms) - t0 ))
-		DELAY_MS=$(( elapsed / 2 ))
-		if [ "$DELAY_MS" -lt "$MIN_DELAY_MS" ]; then
-			DELAY_MS=$MIN_DELAY_MS
-		fi
-		CAL_NOTE="an uninterrupted scan took ${elapsed} ms"
-		say "$CAL_NOTE; interrupting ${DELAY_MS} ms into each round"
-	else
-		# Still running: cancel it to get the session back - which is already
-		# one cancellation of a scan in flight - and stay well inside it.
-		say "still running after ${CAL_DEADLINE}s; cancelling to get the session back"
-		backend_signal "$SESS_PID" cancel >/dev/null
-		session_mark "$DEADLINE" ||
-			die "the session did not come back within ${DEADLINE}s after the calibration cancel"
-		DELAY_MS=$LONG_DELAY_MS
-		CAL_NOTE="an uninterrupted scan takes longer than ${CAL_DEADLINE}s"
-		say "$CAL_NOTE; interrupting ${DELAY_MS} ms into each round"
+	if ! session_mark "$CAL_DEADLINE"; then
+		calibration_too_slow
+		return 0
 	fi
+
+	elapsed=$(( $(now_ms) - t0 ))
+	DELAY_MS=$(( elapsed / 2 ))
+	if [ "$DELAY_MS" -lt "$MIN_DELAY_MS" ]; then
+		DELAY_MS=$MIN_DELAY_MS
+	fi
+	CAL_NOTE="a warm uninterrupted scan took ${elapsed} ms"
+	say "$CAL_NOTE; interrupting ${DELAY_MS} ms into each round"
 }
 
 # One round.  Returns non-zero only when the session did not come back, which

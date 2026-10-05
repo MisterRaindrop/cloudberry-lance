@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sync the generated Lance fixtures into the MinIO bucket used by the s3:// cases.
 
-Connection details and credentials come from ``test/gate/env.sh`` (gitignored,
+Connection details and credentials come from ``test/run/env.sh`` (gitignored,
 written by the main session):
 
     LANCE_S3_ENDPOINT_HOST   endpoint reachable from this host, e.g. http://localhost:9000
@@ -48,7 +48,7 @@ class Config:
 def parse_env_file(text: str) -> dict:
     """Read ``export NAME=value`` lines the way a shell would, roughly.
 
-    Only what test/gate/env.sh actually contains is supported: one assignment
+    Only what test/run/env.sh actually contains is supported: one assignment
     per line, optional ``export``, optional single or double quotes, ``#``
     comments on their own line.
     """
@@ -124,7 +124,7 @@ def main(argv=None) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", default=here, help="fixture root holding data/")
-    ap.add_argument("--env-file", default=os.path.join(here, "..", "gate", "env.sh"))
+    ap.add_argument("--env-file", default=os.path.join(here, "..", "run", "env.sh"))
     ap.add_argument("--no-env-file", action="store_true",
                     help="take every setting from the environment instead")
     ap.add_argument("--prefix", default=DEFAULT_PREFIX,

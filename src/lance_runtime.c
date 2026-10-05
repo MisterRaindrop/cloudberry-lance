@@ -384,7 +384,7 @@ lance_rt_set_thread_limits(void)
  * lance's own IO and compute pools come up on the first read.  None of that
  * happens in lance_session_new(), which only builds the two caches - so a mask
  * around the first call alone left every worker thread able to take SIGINT,
- * SIGUSR1, SIGALRM and the rest, which is what test/stress/cancel_loop.sh
+ * SIGUSR1, SIGALRM and the rest, which is what test/stability/cancel_loop.sh
  * caught (16 of 17 threads on a 16-core box, tokio's default worker count).
  *
  * Hence every call into lance-c runs with all signals blocked on the calling

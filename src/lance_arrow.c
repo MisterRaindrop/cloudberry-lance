@@ -199,7 +199,7 @@ lance_arrow_has_blob_v2_children(const struct ArrowSchema *field)
  * upstream (issue #76).
  *
  * Measured against lance-c v0.1.9, by taking each half out in turn and running
- * the gate: the metadata half is what stops IMPORT declaring the column, and
+ * the suites: the metadata half is what stops IMPORT declaring the column, and
  * without it the descriptor becomes a five-field composite type in the user's
  * schema.  The stream half is a second line of defence rather than the only
  * one, because the descriptor's "position" child arrives as uint64, which is

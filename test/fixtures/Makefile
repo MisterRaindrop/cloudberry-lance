@@ -1,7 +1,7 @@
 # Lance fixtures for the lance_fdw regression suites.  See README.md.
 #
 #   make gen      regenerate data/, expected/*.jsonl and manifest.json
-#   make upload   sync data/ into the MinIO bucket from test/gate/env.sh
+#   make upload   sync data/ into the MinIO bucket from test/run/env.sh
 #   make test     run the fixture tests (generates data/ if it is missing)
 #
 # The host virtualenv holds pylance/pyarrow/pytest/minio; override PYTHON to

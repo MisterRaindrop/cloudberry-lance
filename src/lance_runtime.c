@@ -150,9 +150,14 @@ lance_rt_errcode(LanceErrorCode code)
 void
 lance_rt_error(const char *uri)
 {
-	LanceErrorCode code = lance_last_error_code();
-	const char *raw = lance_last_error_message();
+	LanceErrorCode code;
+	const char *raw;
 	char	   *message;
+
+	LANCE_MASKED({
+		code = lance_last_error_code();
+		raw = lance_last_error_message();
+	});
 
 	/*
 	 * Copy the message out of lance-c's thread-local storage before anything
@@ -161,7 +166,7 @@ lance_rt_error(const char *uri)
 	if (raw != NULL)
 	{
 		message = pstrdup(raw);
-		lance_free_string(raw);
+		LANCE_MASKED(lance_free_string(raw));
 	}
 	else
 		message = pstrdup("unknown error");
@@ -204,37 +209,61 @@ lance_rt_set_thread_limits(void)
 	}
 }
 
+/*
+ * I5: signals and lance-c's threads
+ *
+ * A thread inherits the signal mask of the thread that creates it, and the
+ * Rust side creates threads lazily: lance-c's tokio runtime is a LazyLock
+ * built on the first block_on() (third_party/lance-c/src/runtime.rs), and
+ * lance's own IO and compute pools come up on the first read.  None of that
+ * happens in lance_session_new(), which only builds the two caches - so a mask
+ * around the first call alone left every worker thread able to take SIGINT,
+ * SIGUSR1, SIGALRM and the rest, which is what test/stress/cancel_loop.sh
+ * caught (16 of 17 threads on a 16-core box, tokio's default worker count).
+ *
+ * Hence every call into lance-c runs with all signals blocked on the calling
+ * thread (LANCE_MASKED), and the mask is restored right after.  A signal that
+ * arrives meanwhile stays pending and is delivered on the restore, so the
+ * backend's handlers still run on the main thread and before the next
+ * CHECK_FOR_INTERRUPTS() at the batch boundary (I12): cancellation latency is
+ * what it was, and no Rust thread can ever run a PostgreSQL signal handler.
+ */
+void
+lance_rt_block_signals(sigset_t *saved)
+{
+	sigset_t	all;
+	int			rc;
+
+	sigfillset(&all);
+	rc = pthread_sigmask(SIG_BLOCK, &all, saved);
+	if (rc != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("lance_fdw: could not block signals"),
+				 errdetail("pthread_sigmask() returned %d.", rc)));
+}
+
+void
+lance_rt_restore_signals(const sigset_t *saved)
+{
+	/* Cannot fail for a mask this thread handed out; nothing to report. */
+	(void) pthread_sigmask(SIG_SETMASK, saved, NULL);
+}
+
 void
 lance_rt_init(void)
 {
-	sigset_t	blocked;
-	sigset_t	saved;
 	LanceSession *session;
-	int			rc;
 
 	if (rt_session != NULL)
 		return;
 
 	lance_rt_set_thread_limits();
 
-	/*
-	 * Everything lance-c spawns from here inherits this mask, so no worker
-	 * thread will ever run a PostgreSQL signal handler (I5).
-	 */
-	sigfillset(&blocked);
-	rc = pthread_sigmask(SIG_BLOCK, &blocked, &saved);
-	if (rc != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("lance_fdw: could not block signals"),
-				 errdetail("pthread_sigmask() returned %d.", rc)));
+	LANCE_MASKED(session = lance_session_new((uint64_t) lance_index_cache_mb * 1024 * 1024,
+											 (uint64_t) lance_metadata_cache_mb * 1024 * 1024));
 
-	session = lance_session_new((uint64_t) lance_index_cache_mb * 1024 * 1024,
-								(uint64_t) lance_metadata_cache_mb * 1024 * 1024);
-
-	/* Restore before reporting anything: ereport must not run masked. */
-	(void) pthread_sigmask(SIG_SETMASK, &saved, NULL);
-
+	/* Restored before reporting anything: ereport must not run masked. */
 	LANCE_CHECK(session != NULL, NULL);
 
 	rt_session = session;
@@ -329,18 +358,18 @@ lance_rt_release(LanceHandle *handle)
 	switch (handle->kind)
 	{
 		case LANCE_HANDLE_DATASET:
-			lance_dataset_close(handle->dataset);
+			LANCE_MASKED(lance_dataset_close(handle->dataset));
 			handle->dataset = NULL;
 			break;
 		case LANCE_HANDLE_SCANNER:
-			lance_scanner_close(handle->scanner);
+			LANCE_MASKED(lance_scanner_close(handle->scanner));
 			handle->scanner = NULL;
 			break;
 		case LANCE_HANDLE_STREAM:
 			/* The Arrow contract says release runs exactly once. */
 			if (handle->stream.release != NULL)
 			{
-				handle->stream.release(&handle->stream);
+				LANCE_MASKED(handle->stream.release(&handle->stream));
 				handle->stream.release = NULL;
 			}
 			break;

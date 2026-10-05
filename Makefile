@@ -5,6 +5,7 @@
 #   make installcheck     run the pg_regress suites against a running cluster
 #   make check-syntax     gcc -fsyntax-only over src/*.c; needs no cluster and
 #                         no pg_config, only a configured server header tree
+#   make check-scripts    bash -n over test/gate/*.sh and test/stress/*.sh
 #   make clean-lance-c    cargo clean in the submodule (a rebuild costs ~16 min)
 #
 # lance-c is built from the pinned submodule by default.  To use one that is
@@ -39,7 +40,7 @@ OBJS = \
 # "install" first: it creates the extension and the lance_regress schema every
 # other suite builds on.  test/gate/gate.sh keeps the same list.
 REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
-	creds errors_scan types types_errors
+	creds errors_scan types types_errors sigmask
 REGRESS_OPTS = --inputdir=test/regress --outputdir=test/regress
 
 # ---------------------------------------------------------------------------
@@ -97,12 +98,12 @@ check-syntax:
 	done; \
 	echo "check-syntax: all sources parse"
 
-# The gate scripts cannot run here (no docker), so the most this host can do is
-# parse them.
+# The gate and stress scripts cannot run here (no docker, no cluster), so the
+# most this host can do is parse them.
 .PHONY: check-scripts
 check-scripts:
 	@set -e; \
-	for f in test/gate/*.sh; do \
+	for f in test/gate/*.sh test/stress/*.sh; do \
 		echo "  BASH -n  $$f"; \
 		bash -n $$f; \
 	done; \

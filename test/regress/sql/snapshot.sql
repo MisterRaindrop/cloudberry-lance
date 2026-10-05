@@ -45,3 +45,19 @@ SELECT * FROM lance_regress.explain_lance('SELECT count(*) FROM lance_regress.sn
                                           'ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF');
 SELECT * FROM lance_regress.explain_lance('SELECT count(*) FROM lance_regress.snap_latest',
                                           'ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF');
+-- Pinning has to hold on the segments too, and an append-only history cannot
+-- tell: a segment that opened the latest version but read only the fragment
+-- ids the coordinator published would still return version 1's rows.
+-- deleted.lance changes the contents of existing fragments between its two
+-- versions (deletion files on three of the four), so here the difference is
+-- in the rows themselves: 20 at version 1, 16 at the latest.
+CREATE FOREIGN TABLE lance_regress.snap_del_v1 (id integer, v text, n bigint)
+  SERVER snap_files OPTIONS (uri 'deleted.lance', version '1');
+CREATE FOREIGN TABLE lance_regress.snap_del_latest (id integer, v text, n bigint)
+  SERVER snap_files OPTIONS (uri 'deleted.lance');
+SELECT count(*) AS rows, min(id) AS min_id, max(id) AS max_id, sum(n) AS sum_n
+  FROM lance_regress.snap_del_v1;
+SELECT count(*) AS rows, min(id) AS min_id, max(id) AS max_id, sum(n) AS sum_n
+  FROM lance_regress.snap_del_latest;
+SELECT array_agg(id ORDER BY id) AS deleted_after_v1 FROM (
+  SELECT * FROM lance_regress.snap_del_v1 EXCEPT SELECT * FROM lance_regress.snap_del_latest) d;

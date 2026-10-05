@@ -56,12 +56,14 @@ To use a lance-c that already exists instead of building the submodule:
 
 ```sh
 make LANCE_C_PREFIX=/opt/lance-c              # expects include/ and lib/
-make LANCE_C_INCDIR=... LANCE_C_LIBDIR=...    # override either half
+make LANCE_C_INCDIR=... LANCE_C_LIBDIR=...    # name the two directories
 make USE_PKGCONFIG_LANCE_C=1                  # ask pkg-config for lance-c
 ```
 
-In that case nothing is installed for lance-c and the rpath points at the
-library where it already lives.
+In every one of those cases nothing is installed for lance-c and the rpath
+points at the library where it already lives. Naming only `LANCE_C_INCDIR`
+leaves `LANCE_C_LIBDIR` pointing into the submodule's build directory, and the
+rpath then points there too, so pass both or use `LANCE_C_PREFIX`.
 
 Other targets:
 
@@ -116,12 +118,17 @@ A Lance dataset is a set of *fragments*, and a fragment is the unit of
 parallelism. Under the default `mpp_execute 'all segments'`:
 
 - the coordinator opens the dataset once, pins the version it finds, lists the
-  fragment ids and puts uri, version and ids into the plan it dispatches. It
-  reads no data itself;
+  fragment ids and puts uri, version, ids and the planned segment count into
+  the plan it dispatches. It reads no data itself;
 - every segment takes its own share of that list — fragment `i` belongs to
   segment `(i + session_id % N + command_count) % N` — and opens the dataset at
   the version the coordinator pinned. The shares are disjoint and together
   complete, and no segment has to talk to any other to know that;
+- `N` is that planned segment count, not the size of the cluster: a foreign
+  table or its server may set `num_segments`, and Cloudberry then runs the scan
+  on that many segments only, so the split has to use the same number. A
+  `num_segments` larger than the cluster is refused, because such a gang
+  repeats a segment and the two copies cannot tell themselves apart;
 - a segment whose share is empty opens nothing at all, which is what a dataset
   with fewer fragments than segments costs.
 
@@ -171,12 +178,16 @@ and works even against a server whose credentials are wrong.
 
 | Option | Meaning |
 |---|---|
-| `aws_access_key_id` | |
-| `aws_secret_access_key` | |
+| `aws_access_key_id` | The access key identifier to sign requests with. |
+| `aws_secret_access_key` | The secret half of that key pair. |
 | `aws_session_token` | For temporary credentials. |
 
-Credentials are read from the user mapping in whichever process needs them and
-are never put into a plan, an `EXPLAIN`, or a log line.
+Credentials are read from the user mapping in whichever process needs them.
+`lance_fdw` never puts them into a plan, an `EXPLAIN`, its own log lines or its
+error messages. The one place they do appear is the `CREATE USER MAPPING`
+statement itself, which PostgreSQL echoes into the server log like any other
+DDL when `log_statement` is `ddl` or `all`. No wrapper can prevent that, and
+the gate's credential check allows exactly that one line and nothing else.
 
 **Foreign table**
 
@@ -184,9 +195,10 @@ are never put into a plan, an `EXPLAIN`, or a log line.
 |---|---|
 | `uri` | Required. Either absolute (`s3://...`, `file:///...`, `/abs/path`) or relative to the server's `base_uri`. |
 | `version` | Dataset version to read. `0`, the default, means the latest at the time the statement runs. |
-| `batch_size` | Rows per Arrow batch. Default is lance's own, 8192. Lower it for datasets with large binary columns. |
+| `batch_size` | Rows per Arrow batch. Unset means lance-c decides, which is 8192 rows unless its own `LANCE_DEFAULT_BATCH_SIZE` says otherwise. Lower it for datasets with large binary columns. |
 | `rows_hint` | Row estimate for the planner. Default 100000. Planning does no I/O, so this is the only way the planner can know better. |
 | `mpp_execute` | Overrides the server's setting. |
+| `num_segments` | Read by Cloudberry rather than by this wrapper, and it matters only under `mpp_execute 'all segments'`: there it narrows how many segments run the scan, the fragment split follows it, and a value above the number of segments in the cluster is refused, because such a gang repeats a segment and the two copies cannot be told apart. Under `coordinator` or `any` it has no effect and nothing is refused — one process reads every fragment, so there is no split to narrow. |
 
 **Column**
 
@@ -321,16 +333,16 @@ The suites, in the order they run:
 | `errors_ddl` | bad path, bucket, credentials and endpoint, seen from `IMPORT` |
 | `scan_core` | values against the pylance reference output, deletions, empty and gapped fragment lists, schema evolution, `batch_size`, `count(*)`, joins both ways, `file://` and `s3://` |
 | `parallel` | the split is complete and disjoint for 1, 2, 3, 7 and 100 fragments; `coordinator` and `any` agree with `all segments` |
-| `snapshot` | version pinning, in both the rows and the fragment count |
+| `snapshot` | version pinning, in both the rows and the fragment count, including a version whose successor deleted rows from existing fragments — the case an append-only history cannot tell apart on the segments |
 | `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
-| `creds` | the user mapping secret is in no plan; the gate then greps the server logs for it |
+| `creds` | none of the three user mapping credentials is in a plan; the gate then greps the server logs for all three |
 | `errors_scan` | storage failures during a scan, and every shape of type mismatch |
 | `types` | all 31 columns of `types_all` against the pylance reference output, twice over at two batch sizes, plus the MiB-sized text and binary values |
 | `types_errors` | the four strictness rules above, one case each, and the declarations they must not refuse |
 | `sigmask` | I5, read back from `/proc`: after a scan in this backend every lance-c thread blocks the signals a backend is driven by, and the main thread does not |
 
-After the suites, the gate greps the coordinator and segment logs for the fake
-secret the `creds` suite puts in a user mapping. The only line allowed to
+After the suites, the gate greps the coordinator and segment logs for the three
+fake credentials the `creds` suite puts in a user mapping. The only line allowed to
 contain it is the `CREATE USER MAPPING` statement itself, which the server logs
 verbatim like any other DDL.
 
@@ -380,10 +392,15 @@ invariant. `docs/testing.md` has the rest, including what the numbers mean.
 
 - The A-tier list in the type table above is complete; everything outside it is
   refused rather than guessed at.
-- Lance's own blob encoding (a field with `lance-encoding: blob` metadata) is
-  B-tier whatever its Arrow type says, because lance-c v0.1.9 returns a
-  `struct{position, size}` descriptor for such a column and offers no API to
-  read the bytes behind it.
+- Lance's two blob encodings are both B-tier whatever the Arrow type says, but
+  for two different reasons. A field carrying `lance-encoding: blob` metadata
+  (Lance's v1 encoding) is a `large_binary` whose bytes **do** arrive with the
+  scan — measured on values of 1, 2 and 4 MiB — so refusing it is a policy
+  choice this block has not revisited, not a technical limit. A field carrying
+  `ARROW:extension:name = lance.blob.v2` reaches the scanner as a five-field
+  descriptor struct (`kind`, `position`, `size`, `blob_id`, `blob_uri`) with
+  the extension name stripped, and lance-c v0.1.9 exposes no call that turns a
+  descriptor back into a payload; it is refused as an unsupported struct.
 - The refusal of a nanosecond timestamp that is not a whole microsecond is
   implemented but untested: every timestamp in `test/fixtures` is
   microsecond-aligned, and the fixtures are not this package's to change.

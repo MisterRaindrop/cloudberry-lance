@@ -1,0 +1,5 @@
+# lance_fdw extension
+comment = 'read-only foreign-data wrapper for Lance datasets'
+default_version = '0.1'
+module_pathname = '$libdir/lance_fdw'
+relocatable = true

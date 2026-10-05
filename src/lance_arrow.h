@@ -27,7 +27,7 @@
  * metadata - a field carrying "lance-encoding" = "blob" is B-tier whatever its
  * Arrow type says.  That is a policy choice rather than a technical limit:
  * such a field is Lance's v1 blob encoding and its bytes do arrive with the
- * scan (PROBES, "blob 两种编码的实测").  Lance's v2 blob encoding carries no
+ * scan, measured at 1, 2 and 4 MiB.  Lance's v2 blob encoding carries no
  * such metadata and never reaches this rule: the scanner hands it out as a
  * five-field descriptor struct with the extension name stripped, so it is
  * refused as an unsupported struct instead.

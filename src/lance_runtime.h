@@ -22,6 +22,16 @@ extern int	lance_io_threads;
 extern int	lance_index_cache_mb;
 extern int	lance_metadata_cache_mb;
 
+/*
+ * Filter pushdown, on by default (DESIGN D6).  Unlike the four above this one
+ * is PGC_USERSET and is read at *planning* time, on every plan - so it only
+ * ever matters on the QD, and the value a segment has is irrelevant.  Its
+ * assign hook resets the plan cache, because a cached generic plan has already
+ * dropped the local quals and frozen the filter: without that reset a SET
+ * would silently fail to take effect on a pooled or prepared statement.
+ */
+extern bool lance_enable_filter_pushdown;
+
 extern void lance_rt_define_gucs(void);
 
 /* Hook the handle registry onto ResourceOwner release; call once, at load. */

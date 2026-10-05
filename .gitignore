@@ -16,3 +16,8 @@ __pycache__/
 test/fixtures/data/
 # secrets for the gate (MinIO credentials)
 test/gate/env.sh
+
+# router planning documents: local working notes, not part of the package
+.router/
+# throwaway probe programs and the datasets they generate
+test/probe/

@@ -25,8 +25,12 @@
  *
  * The decision reads two things (DESIGN D8): the Arrow type, and the field
  * metadata - a field carrying "lance-encoding" = "blob" is B-tier whatever its
- * Arrow type says, because lance-c's scanner hands out a
- * struct{position,size} descriptor for it rather than the bytes (PROBES Q3).
+ * Arrow type says.  That is a policy choice rather than a technical limit:
+ * such a field is Lance's v1 blob encoding and its bytes do arrive with the
+ * scan (PROBES, "blob 两种编码的实测").  Lance's v2 blob encoding carries no
+ * such metadata and never reaches this rule: the scanner hands it out as a
+ * five-field descriptor struct with the extension name stripped, so it is
+ * refused as an unsupported struct instead.
  *
  * Returns true when the field is A-tier, in which case *typid and *typmod are
  * set; *is_b_tier is always set and is the inverse of the return value.

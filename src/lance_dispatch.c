@@ -42,7 +42,8 @@
 #define LANCE_UNIT_URI		1
 #define LANCE_UNIT_VERSION	2
 #define LANCE_UNIT_IDS		3
-#define LANCE_UNIT_NFIELDS	4
+#define LANCE_UNIT_SEGMENTS	4
+#define LANCE_UNIT_NFIELDS	5
 
 char *
 lance_dispatch_ids_string(const uint64 *ids, int nids)
@@ -62,7 +63,7 @@ lance_dispatch_ids_string(const uint64 *ids, int nids)
 }
 
 static List *
-lance_dispatch_make_units(const char *uri, uint64 version,
+lance_dispatch_make_units(const char *uri, uint64 version, int nsegments,
 						  const uint64 *ids, int nids)
 {
 	List	   *unit = NIL;
@@ -75,12 +76,16 @@ lance_dispatch_make_units(const char *uri, uint64 version,
 	 * ids, and spaces are escaped by the serialiser like any other.
 	 */
 	if (ids_text[0] == '\0')
+	{
+		pfree(ids_text);
 		ids_text = pstrdup(" ");
+	}
 
 	unit = lappend(unit, makeString(pstrdup(LANCE_SCAN_UNIT_KIND)));
 	unit = lappend(unit, makeString(pstrdup(uri)));
 	unit = lappend(unit, makeString(psprintf(UINT64_FORMAT, version)));
 	unit = lappend(unit, makeString(ids_text));
+	unit = lappend(unit, makeString(psprintf("%d", nsegments)));
 
 	return unit;
 }
@@ -110,7 +115,7 @@ lance_dispatch_free_units(List *units)
 
 void
 lance_dispatch_publish(ForeignScan *fsplan, const char *uri, uint64 version,
-					   const uint64 *ids, int nids)
+					   int nsegments, const uint64 *ids, int nids)
 {
 	/*
 	 * The list has to outlive this executor run, because what reads it is the
@@ -123,7 +128,7 @@ lance_dispatch_publish(ForeignScan *fsplan, const char *uri, uint64 version,
 	MemoryContext oldcxt = MemoryContextSwitchTo(plancxt);
 	List	   *units;
 
-	units = lance_dispatch_make_units(uri, version, ids, nids);
+	units = lance_dispatch_make_units(uri, version, nsegments, ids, nids);
 
 	if (list_length(fsplan->fdw_private) > LANCE_FDW_PRIVATE_UNITS)
 	{
@@ -233,6 +238,8 @@ lance_dispatch_read_units(const ForeignScan *fsplan, LanceScanUnits *out)
 											   "dataset version");
 	lance_dispatch_parse_ids(strVal(list_nth(unit, LANCE_UNIT_IDS)),
 							 &out->ids, &out->nids);
+	out->nsegments = (int) lance_dispatch_parse_uint64(strVal(list_nth(unit, LANCE_UNIT_SEGMENTS)),
+													   "segment count");
 
 	/*
 	 * A unit kind this build does not know can only come from a newer plan,
@@ -247,21 +254,32 @@ lance_dispatch_read_units(const ForeignScan *fsplan, LanceScanUnits *out)
 }
 
 int
-lance_dispatch_take_share(uint64 *ids, int nids)
+lance_dispatch_take_share(uint64 *ids, int nids, int nsegments)
 {
-	int			nsegments = getgpsegmentCount();
 	int			mysegment = GpIdentity.segindex;
 	int64		shift;
 	int			kept = 0;
 	int			i;
 
 	/*
-	 * Not knowing how many segments there are, or which one this is, would
-	 * turn a split into data loss.  Reading everything is the safe answer and
-	 * cannot happen on a QE of a dispatched statement.
+	 * The modulus is the width the QD planned for, not the size of the
+	 * cluster.  A foreign table or its server may set num_segments, and
+	 * Cloudberry then builds the Strewn locus for that many segments
+	 * (plancat.c:541 -> pathnode.c:3671), executing the slice on contents
+	 * 0..num_segments-1 only.  Dividing the fragments among every content of
+	 * the cluster would leave the ones assigned to a segment that never runs
+	 * unread, which is silent data loss rather than a slower scan (I2).
 	 */
-	if (nsegments <= 0 || mysegment < 0 || mysegment >= nsegments)
-		return nids;
+	if (nsegments <= 0 || mysegment < 0)
+		return nids;			/* not a QE of a dispatched statement */
+
+	/*
+	 * A segment outside the planned width has no share.  It should not be
+	 * running this slice at all; reading anything here would duplicate what a
+	 * participating segment already read.
+	 */
+	if (mysegment >= nsegments)
+		return 0;
 
 	/*
 	 * Both terms are the same on every QE of one statement, which is the whole

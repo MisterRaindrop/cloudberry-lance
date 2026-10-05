@@ -435,6 +435,27 @@ def build_empty() -> Built:
                  notes=["pylance writes no fragment at all for an empty table"])
 
 
+def build_empty_b() -> Built:
+    """Zero rows and a schema the wrapper cannot read.
+
+    The empty-dataset projection check has to work off the schema, so proving
+    it covers the tier decision needs a dataset with no rows at all *and* a
+    B-tier column: with rows, the refusal could come from the stream converter
+    instead and the test would prove nothing about the new path.
+    """
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("c_uint64", pa.uint64()),
+    ])
+    return Built(
+        purpose="Zero rows with a B-tier column: an empty dataset whose "
+                "projection still has to be refused.",
+        table=pa.table({"id": pa.array([], pa.int32()),
+                        "c_uint64": pa.array([], pa.uint64())}, schema=schema),
+        notes=["pylance writes no fragment at all for an empty table, so this "
+               "dataset has a schema and nothing else"])
+
+
 def build_frag(n_fragments: int, rows_per_fragment: int) -> Callable[[], Built]:
     def build() -> Built:
         return Built(
@@ -538,6 +559,39 @@ def build_large_text() -> Built:
                "literally; 'txt' is written as {chars, bytes, md5}"])
 
 
+def build_strict() -> Built:
+    """Values the wrapper must refuse per value rather than distort (I7).
+
+    Two pairs of columns, each an ordinary value next to one PostgreSQL cannot
+    hold: a nanosecond timestamp that is not a whole microsecond, and a UTF-8
+    string with a zero byte in it.  Reading the ordinary column of a pair has
+    to keep working, which is what tells a refusal from a broken converter.
+    """
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("ts_ns_aligned", pa.timestamp("ns")),
+        pa.field("ts_ns_odd", pa.timestamp("ns")),
+        pa.field("s_plain", pa.string()),
+        pa.field("s_nul", pa.string()),
+    ])
+    aligned = [1_000_000_000, 1_700_000_000_123_456_000, None]
+    odd = [1_234_567, 1_700_000_000_123_456_789, None]
+    return Built(
+        purpose="Per-value strictness: a nanosecond timestamp that is not a "
+                "whole microsecond, and a string carrying a zero byte.",
+        table=pa.table({
+            "id": pa.array([0, 1, 2], pa.int32()),
+            "ts_ns_aligned": pa.array(aligned, pa.timestamp("ns")),
+            "ts_ns_odd": pa.array(odd, pa.timestamp("ns")),
+            "s_plain": pa.array(["plain", "\u00fcnicode", None], pa.string()),
+            "s_nul": pa.array(["a\x00b", "ok", None], pa.string()),
+        }, schema=schema),
+        notes=["ts_ns_odd row 0 is 1234567 ns and row 1 ends in 789 ns: "
+               "neither is a whole microsecond",
+               "s_nul row 0 holds a zero byte, which a PostgreSQL text datum "
+               "cannot contain at all"])
+
+
 def build_big(fragments: int, rows_per_fragment: int, blob_bytes: int) -> Callable[[], Built]:
     """AC5 timing fixture: not deterministic, not byte-compared, opt-in."""
     def build() -> Built:
@@ -572,6 +626,7 @@ BUILDERS: dict[str, Callable[[], Built]] = {
     "types_b": build_types_b,
     "deleted": build_deleted,
     "empty": build_empty,
+    "empty_b": build_empty_b,
     "frag_1": build_frag(1, 5),
     "frag_2": build_frag(2, 5),
     "frag_3": build_frag(3, 5),
@@ -582,6 +637,7 @@ BUILDERS: dict[str, Callable[[], Built]] = {
     "blob": build_blob,
     "large_text": build_large_text,
     "versions": build_versions,
+    "strict": build_strict,
 }
 
 BIG = "big"

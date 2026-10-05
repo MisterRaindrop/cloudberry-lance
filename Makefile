@@ -51,6 +51,18 @@ LANCE_C_DIR = third_party/lance-c
 CARGO ?= cargo
 CARGO_BUILD_FLAGS ?= --release
 
+# Read before the defaults below assign anything, because ?= would make every
+# one of them look like it came from the makefile: a directory named by hand
+# means the library is somebody else's, so it is used where it is instead of
+# being copied in next to lance_fdw.so.
+LANCE_C_DIR_GIVEN = no
+ifneq ($(origin LANCE_C_INCDIR),undefined)
+LANCE_C_DIR_GIVEN = yes
+endif
+ifneq ($(origin LANCE_C_LIBDIR),undefined)
+LANCE_C_DIR_GIVEN = yes
+endif
+
 ifdef LANCE_C_PREFIX
 LANCE_C_INCDIR ?= $(LANCE_C_PREFIX)/include
 LANCE_C_LIBDIR ?= $(LANCE_C_PREFIX)/lib
@@ -63,7 +75,11 @@ LANCE_C_BUNDLED = no
 else
 LANCE_C_INCDIR ?= $(LANCE_C_DIR)/include
 LANCE_C_LIBDIR ?= $(LANCE_C_DIR)/target/release
+ifeq ($(LANCE_C_DIR_GIVEN),yes)
+LANCE_C_BUNDLED = no
+else
 LANCE_C_BUNDLED = yes
+endif
 endif
 endif
 

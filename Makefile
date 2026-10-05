@@ -40,7 +40,8 @@ OBJS = \
 # "install" first: it creates the extension and the lance_regress schema every
 # other suite builds on.  test/gate/gate.sh keeps the same list.
 REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
-	creds errors_scan types types_errors sigmask
+	creds errors_scan types types_errors types_nested types_nested_errors \
+	sigmask
 REGRESS_OPTS = --inputdir=test/regress --outputdir=test/regress
 
 # ---------------------------------------------------------------------------

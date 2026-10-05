@@ -15,15 +15,20 @@ $$;
 -- same quality the projection gets - not a raw lance: message from a segment.
 CREATE FOREIGN TABLE lance_feature.pde_missing (id integer, nosuch integer)
   SERVER pde_files OPTIONS (uri 'types_all.lance');
-SELECT count(*) FROM lance_feature.pde_missing WHERE nosuch = 1;
+SELECT * FROM lance_feature.report(
+  'SELECT count(*) FROM lance_feature.pde_missing WHERE nosuch = 1');
+report
 ERROR:  lance_fdw: column "nosuch": the dataset has no such column
-DETAIL:  It is referenced by a qualifier pushed down to Lance, while reading uri /home/gpadmin/cloudberry-lance/test/fixtures/data/types_all.lance.
+DETAIL:  It is referenced by a qualifier pushed down to Lance, while reading uri <redacted>.
 HINT:  Use IMPORT FOREIGN SCHEMA, or the column_name option where the two names differ.
+(3 rows)
 -- The same column in the projection, for comparison: both paths must refuse.
-SELECT nosuch FROM lance_feature.pde_missing;
+SELECT * FROM lance_feature.report('SELECT nosuch FROM lance_feature.pde_missing');
+report
 ERROR:  lance_fdw: column "nosuch": the dataset has no such column
-DETAIL:  While reading uri /home/gpadmin/cloudberry-lance/test/fixtures/data/types_all.lance.
+DETAIL:  While reading uri <redacted>.
 HINT:  Use IMPORT FOREIGN SCHEMA, or the column_name option where the two names differ.
+(3 rows)
 -- column_name maps a table column onto a differently named Lance column.  The
 -- qualifier must be rendered against the Lance name, not the table's.
 CREATE FOREIGN TABLE lance_feature.pde_renamed (id integer, mine integer)

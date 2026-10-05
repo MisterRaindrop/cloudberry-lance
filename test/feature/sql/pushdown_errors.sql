@@ -16,9 +16,10 @@ $$;
 -- same quality the projection gets - not a raw lance: message from a segment.
 CREATE FOREIGN TABLE lance_feature.pde_missing (id integer, nosuch integer)
   SERVER pde_files OPTIONS (uri 'types_all.lance');
-SELECT count(*) FROM lance_feature.pde_missing WHERE nosuch = 1;
+SELECT * FROM lance_feature.report(
+  'SELECT count(*) FROM lance_feature.pde_missing WHERE nosuch = 1');
 -- The same column in the projection, for comparison: both paths must refuse.
-SELECT nosuch FROM lance_feature.pde_missing;
+SELECT * FROM lance_feature.report('SELECT nosuch FROM lance_feature.pde_missing');
 
 -- column_name maps a table column onto a differently named Lance column.  The
 -- qualifier must be rendered against the Lance name, not the table's.

@@ -31,6 +31,8 @@
 #include "lance_fdw.h"
 #include "lance_runtime.h"
 
+#include "utils/vmem_tracker.h"
+
 #include "utils/plancache.h"
 
 #include "utils/guc.h"
@@ -41,6 +43,9 @@ int			lance_cpu_threads = 0;
 int			lance_io_threads = 0;
 int			lance_index_cache_mb = 64;
 int			lance_metadata_cache_mb = 32;
+int			lance_io_buffer_size_mb = 0;
+int			lance_batch_readahead = 0;
+bool		lance_track_memory = true;
 bool		lance_enable_filter_pushdown = true;
 
 /*
@@ -76,6 +81,17 @@ struct LanceHandle
 };
 
 static LanceSession *rt_session = NULL;
+
+/* Arrow bytes this backend has on the vmem ledger; see lance_rt_vmem_*. */
+static int64 rt_vmem_reserved = 0;
+
+/*
+ * High-water mark of the above.  The instantaneous value is almost always zero
+ * when anything asks for it - a batch is held only between one IterateForeignScan
+ * and the next - so the peak is what a person sizing the bounds actually needs,
+ * and it is the only figure a test can observe without racing the scan.
+ */
+static int64 rt_vmem_peak = 0;
 static bool rt_callback_registered = false;
 static LanceHandle *rt_handles = NULL;
 
@@ -146,6 +162,126 @@ lance_rt_define_gucs(void)
 							PGC_SUSET,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("lance_fdw.io_buffer_size_mb",
+							"Size of the I/O buffer one scan may fill, in MB.",
+							"0 leaves lance-c at its own default. This bounds "
+							"buffered reads, not everything a scan allocates. "
+							"Every backend reads its own value when a scan "
+							"opens, and under \"all segments\" each segment "
+							"buffers this much at the same time, so a "
+							"cluster-wide bound belongs in postgresql.conf "
+							"rather than in a session SET.",
+							&lance_io_buffer_size_mb,
+							0, 0, 1024 * 1024,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("lance_fdw.batch_readahead",
+							"Number of batches a scan may decode concurrently.",
+							"0 leaves lance-c at its own default. Decoded "
+							"batches are held at once, so this multiplies "
+							"whatever one batch costs - the row or byte batch "
+							"size the table sets. Read per backend when a scan "
+							"opens, like lance_fdw.io_buffer_size_mb.",
+							&lance_batch_readahead,
+							0, 0, 1024,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("lance_fdw.track_memory",
+							 "Charge Arrow batches to Cloudberry's memory "
+							 "accounting.",
+							 "lance allocates batches outside palloc, so "
+							 "without this the resource group, "
+							 "gp_vmem_protect_limit and the runaway detector "
+							 "cannot see them and the OOM killer is what "
+							 "notices. Turn it off only if the accounting "
+							 "itself is in the way.",
+							 &lance_track_memory,
+							 true,
+							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+}
+
+/*
+ * Why the reservation happens after the fact: the Arrow C Data Interface hands
+ * over a batch lance has already allocated, with no way to ask first.  So this
+ * detects rather than prevents, and what bounds the overshoot between the
+ * allocation and this check is the batch_size_bytes table option.
+ */
+int64
+lance_rt_vmem_reserve(int64 bytes, const char *uri)
+{
+	MemoryAllocationStatus st;
+	const char *reason;
+
+	if (!lance_track_memory || bytes <= 0 || !VmemTrackerIsActivated())
+		return 0;
+
+	st = VmemTracker_ReserveVmem(bytes);
+	if (st == MemoryAllocation_Success)
+	{
+		rt_vmem_reserved += bytes;
+		if (rt_vmem_reserved > rt_vmem_peak)
+			rt_vmem_peak = rt_vmem_reserved;
+		return bytes;
+	}
+
+	switch (st)
+	{
+		case MemoryFailure_VmemExhausted:
+			reason = "the per-segment vmem limit is exhausted";
+			break;
+		case MemoryFailure_SystemMemoryExhausted:
+			reason = "system memory is exhausted";
+			break;
+		case MemoryFailure_QueryMemoryExhausted:
+			reason = "this query's memory is exhausted";
+			break;
+		case MemoryFailure_ResourceGroupMemoryExhausted:
+			reason = "the resource group's memory is exhausted";
+			break;
+		default:
+			reason = "the memory reservation was refused";
+			break;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_OUT_OF_MEMORY),
+			 errmsg("lance_fdw: cannot reserve " INT64_FORMAT " bytes for a Lance batch",
+					bytes),
+			 errdetail("%s While reading uri %s.", reason,
+					   uri != NULL ? uri : "?"),
+			 errhint("Set batch_size_bytes on the foreign table to bound one "
+					 "batch, lower lance_fdw.batch_readahead, or raise the "
+					 "memory limit.")));
+	return 0;					/* unreachable */
+}
+
+void
+lance_rt_vmem_release(int64 bytes)
+{
+	if (bytes <= 0)
+		return;
+
+	VmemTracker_ReleaseVmem(bytes);
+	rt_vmem_reserved -= bytes;
+}
+
+int64
+lance_rt_vmem_reserved(void)
+{
+	return rt_vmem_reserved;
+}
+
+int64
+lance_rt_vmem_peak(void)
+{
+	return rt_vmem_peak;
 }
 
 /*

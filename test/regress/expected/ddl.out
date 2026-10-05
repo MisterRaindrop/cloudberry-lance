@@ -55,6 +55,21 @@ SELECT format('%s: %s', a.attname, o.opt) AS column_option
 column_option
 v: column_name=renamed_v
 (1 row)
+-- The byte limit on its own is accepted; ALTER has to see the combination too,
+-- because the validator is handed the merged option list, not just the change.
+CREATE FOREIGN TABLE lance_regress.ddl_bytes (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'ds.lance', batch_size_bytes '1048576');
+SELECT o.opt AS bytes_option
+  FROM pg_foreign_table t, unnest(t.ftoptions) AS o(opt)
+  WHERE t.ftrelid = 'lance_regress.ddl_bytes'::regclass ORDER BY 1;
+bytes_option
+batch_size_bytes=1048576
+uri=ds.lance
+(2 rows)
+ALTER FOREIGN TABLE lance_regress.ddl_bytes OPTIONS (ADD batch_size '128');
+ERROR:  options "batch_size" and "batch_size_bytes" cannot be used together
+DETAIL:  lance lets the byte limit take precedence, so "batch_size" would have no effect.
+HINT:  Keep whichever limit you meant.
 -- mpp_execute may be overridden on a server and on a table.
 CREATE SERVER lance_coord_srv FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri 'file:///lance/base', mpp_execute 'coordinator');
@@ -98,13 +113,28 @@ CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
 ERROR:  invalid value for option "batch_size": "0"
 DETAIL:  The batch size must be a positive integer.
 CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size_bytes '0');
+ERROR:  invalid value for option "batch_size_bytes": "0"
+DETAIL:  The batch size in bytes must be a positive integer.
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size_bytes 'lots');
+ERROR:  invalid value for option "batch_size_bytes": "lots"
+DETAIL:  The batch size in bytes must be a positive integer.
+-- lance lets a byte limit override a row limit, so taking both would ignore
+-- one of them without saying so.
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
+  OPTIONS (uri 'x', batch_size '128', batch_size_bytes '1048576');
+ERROR:  options "batch_size" and "batch_size_bytes" cannot be used together
+DETAIL:  lance lets the byte limit take precedence, so "batch_size" would have no effect.
+HINT:  Keep whichever limit you meant.
+CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', rows_hint 'lots');
 ERROR:  invalid value for option "rows_hint": "lots"
 DETAIL:  The row estimate must be a positive number.
 CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', base_uri 'y');
 ERROR:  invalid option "base_uri"
-HINT:  Valid options in this context are: mpp_execute, uri, version, batch_size, rows_hint.
+HINT:  Valid options in this context are: mpp_execute, uri, version, batch_size, batch_size_bytes, rows_hint.
 CREATE FOREIGN TABLE lance_regress.bad (id integer OPTIONS (nope 'x')) SERVER lance_ddl_srv
   OPTIONS (uri 'x');
 ERROR:  invalid option "nope"

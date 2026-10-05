@@ -21,6 +21,7 @@ typedef struct LanceTableOptions
 	char	   *uri;			/* resolved against the server's base_uri */
 	uint64		version;		/* dataset version, 0 = latest */
 	int64		batch_size;		/* 0 = leave lance-c at its default */
+	int64		batch_size_bytes;	/* 0 = leave lance-c at its default */
 	double		rows_hint;		/* 0 = use LANCE_FDW_DEFAULT_ROWS */
 } LanceTableOptions;
 

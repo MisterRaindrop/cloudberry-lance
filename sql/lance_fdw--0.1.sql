@@ -14,6 +14,39 @@ AS 'MODULE_PATHNAME', 'lance_fdw_validator'
 LANGUAGE C STRICT;
 
 /*
+ * Arrow batches are allocated by lance outside palloc.  This wrapper charges
+ * them to Cloudberry's memory accounting so that the resource group and
+ * gp_vmem_protect_limit can see them; these two report what it is holding and
+ * how the per-backend lance caches are doing.  Both are backend-local, so on a
+ * segment they describe that segment's process.
+ */
+CREATE FUNCTION lance_fdw_memory(
+  OUT current_bytes bigint,
+  OUT peak_bytes bigint)
+RETURNS record
+AS 'MODULE_PATHNAME', 'lance_fdw_memory'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+COMMENT ON FUNCTION lance_fdw_memory() IS
+  'Arrow bytes on the vmem ledger for this backend: now, and at its highest';
+
+CREATE FUNCTION lance_fdw_cache_stats(
+  OUT index_cache_hits bigint,
+  OUT index_cache_misses bigint,
+  OUT index_cache_entries bigint,
+  OUT index_cache_size_bytes bigint,
+  OUT metadata_cache_hits bigint,
+  OUT metadata_cache_misses bigint,
+  OUT metadata_cache_entries bigint,
+  OUT metadata_cache_size_bytes bigint)
+RETURNS record
+AS 'MODULE_PATHNAME', 'lance_fdw_cache_stats'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+COMMENT ON FUNCTION lance_fdw_cache_stats() IS
+  'hit and miss counters for this backend''s lance index and metadata caches';
+
+/*
  * mpp_execute defaults to 'all segments' so that the planner puts the
  * ForeignScan on every segment and gives it a Strewn locus (DESIGN D1).  A
  * server or a table may still override it with 'coordinator' or 'any', in

@@ -144,7 +144,7 @@ Timings to expect, on 16 cores:
 | Step | Cost |
 |---|---|
 | lance-c from a cold `target/` | ~16 minutes; `--clean` pays this every time |
-| the 13 pg_regress suites | ~45 seconds |
+| the 17 pg_regress suites | ~45 seconds |
 | the two unreachable-endpoint cases inside that, in `errors_ddl` and `errors_scan` | ~10 seconds each, spent in the object store's retry backoff |
 
 With a warm `target/` the rest of a round is the tar, the extension's own
@@ -168,6 +168,36 @@ them to MinIO, and streams them into the container. The `big` fixture is opt-in:
 make -C test/fixtures gen GEN_FLAGS=--with-big          # ~1.5 GB, not deterministic
 make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
 ```
+
+### MinIO, and how the container reaches it
+
+The `s3://` cases need an S3 service, and `test/run/env.sh` - not in the
+repository, since it carries credentials - says where it is. It names the
+endpoint twice, because two different machines talk to it:
+`LANCE_S3_ENDPOINT_HOST` is what the uploader on the host uses, and
+`LANCE_S3_ENDPOINT_CONTAINER` is what the coordinator and segments use from
+inside the Cloudberry container. Alongside those it exports
+`LANCE_S3_BUCKET`, `LANCE_S3_REGION`, `LANCE_S3_KEY` and `LANCE_S3_SECRET`.
+
+Run MinIO as a container and put it on a user-defined network with the
+Cloudberry container, then address it by name:
+
+```sh
+docker network create lance-net
+docker network connect lance-net lance-minio
+docker network connect lance-net cloudberry-lance
+# in test/run/env.sh:
+export LANCE_S3_ENDPOINT_CONTAINER=http://lance-minio:9000
+```
+
+Two other choices look simpler and are each wrong for their own reason.
+`host.docker.internal` leaves the Docker VM and comes back in through Docker
+Desktop's host networking; the 1.5 GB `big` fixture overran that path's
+buffers (`write unixgram: no buffer space available`) and took the whole
+daemon down with it. The default bridge address keeps the traffic inside the
+VM, but the default bridge has no DNS, so the address is whatever Docker
+handed out and moves when either container is recreated. A user-defined
+network has neither problem.
 
 ## The stability scripts
 

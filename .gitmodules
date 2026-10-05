@@ -1,0 +1,3 @@
+[submodule "third_party/lance-c"]
+	path = third_party/lance-c
+	url = https://github.com/lance-format/lance-c

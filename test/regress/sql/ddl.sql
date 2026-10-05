@@ -1,7 +1,8 @@
 -- ddl: the option surface of DESIGN section 2 - what is accepted, what is
 -- rejected, and where - plus a pg_dump round trip and a clean uninstall.
--- Every uri here is synthetic and no statement reaches an object store, which
--- is also what shows that DDL does no I/O (I13).
+-- Every uri here is synthetic: the DDL itself never reaches an object store,
+-- which is what shows that validation does no I/O (I13), and the one scan
+-- below is there to fail.
 \pset format unaligned
 CREATE SERVER lance_ddl_srv FOREIGN DATA WRAPPER lance_fdw
   OPTIONS (base_uri 'file:///lance/base',
@@ -61,7 +62,8 @@ CREATE FOREIGN TABLE lance_regress.bad (id integer) SERVER lance_ddl_srv
   OPTIONS (uri 'x', base_uri 'y');
 CREATE FOREIGN TABLE lance_regress.bad (id integer OPTIONS (nope 'x')) SERVER lance_ddl_srv
   OPTIONS (uri 'x');
--- The scan is not in this build yet and says so instead of returning rows.
+-- The one statement in this suite that does reach for a store, and the uri is
+-- synthetic, so it comes back as a lance error rather than rows.
 SELECT lance_regress.capture($$SELECT * FROM lance_regress.ddl_all$$) AS scan;
 -- pg_dump round trip: the dumped definition rebuilds the same foreign table.
 \! pg_dump --schema-only --no-owner --table=lance_regress.ddl_all contrib_regression > test/regress/results/ddl_dump.sql 2>&1

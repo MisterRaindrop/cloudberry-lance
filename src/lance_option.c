@@ -385,6 +385,16 @@ lance_get_table_options(Oid foreigntableid, LanceTableOptions *opts)
 								  opts->raw_uri);
 }
 
+char *
+lance_get_column_name(Oid foreigntableid, AttrNumber attnum,
+					  const char *attname)
+{
+	List	   *options = GetForeignColumnOptions(foreigntableid, attnum);
+	char	   *name = lance_find_string_option(options, "column_name");
+
+	return pstrdup(name != NULL ? name : attname);
+}
+
 /*
  * User mapping options for (userid, serverid), falling back to the PUBLIC
  * mapping.  This is the lookup GetUserMapping() does, minus its hard error for

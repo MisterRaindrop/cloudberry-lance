@@ -27,6 +27,7 @@ TABLE="$DATASET.lance"
 SCAN_SQL="SELECT sum(pg_column_size(t)) FROM lance_feature.stability_scan t;"
 
 MIN_DELAY_MS=50
+CAL_SAMPLES=3
 LONG_DELAY_MS=2000
 
 DELAY_MS=0
@@ -139,7 +140,7 @@ calibration_too_slow() {
 }
 
 calibrate() {
-	local t0 elapsed
+	local t0 elapsed fastest="" i
 
 	if [ "$DELAY_SPEC" != auto ]; then
 		DELAY_MS=$DELAY_SPEC
@@ -147,14 +148,17 @@ calibrate() {
 		return 0
 	fi
 
-	# Two scans, and it is the second that is timed.  Every round below runs
-	# with lance's metadata cache already filled and the object store's own
-	# caches warm, so halving the *first* scan of a session measures something
-	# the rounds never experience.  How wrong that is depends on how fast the
-	# store is: against MinIO over the docker bridge the first scan of the big
-	# fixture took 1366 ms and every scan after it under 683 ms, so the
-	# interrupt arrived after the round had already finished and 49 of 50
-	# rounds tested nothing.
+	# One scan to warm up, then $CAL_SAMPLES timed, and it is the fastest of
+	# those that is halved.  Every round below runs warm - lance's metadata
+	# cache filled, the object store's caches hot - so the figure has to be a
+	# warm one, and warming takes more than one scan: against MinIO on a
+	# docker network the big fixture read in 719 ms, then 514, then settled
+	# at 412-463 ms for the next eighteen.  Timing only the second scan
+	# landed on that tail once at 774 ms; half of it, 387 ms, is about what a
+	# settled scan takes in full, and once the interrupt's own latency was
+	# added (up to 164 ms measured) 36 of 50 rounds finished first.  The
+	# fastest sample is the one that bounds how early a round can end, and
+	# halving it leaves room for the interrupt to land.
 	say "warming up with one scan of $DATASET (up to ${CAL_DEADLINE}s)"
 	session_send "$SCAN_SQL"
 	if ! session_mark "$CAL_DEADLINE"; then
@@ -162,20 +166,26 @@ calibrate() {
 		return 0
 	fi
 
-	say "timing one uninterrupted scan of $DATASET (up to ${CAL_DEADLINE}s)"
-	t0=$(now_ms)
-	session_send "$SCAN_SQL"
-	if ! session_mark "$CAL_DEADLINE"; then
-		calibration_too_slow
-		return 0
-	fi
+	say "timing $CAL_SAMPLES uninterrupted scans of $DATASET (up to ${CAL_DEADLINE}s each)"
+	for (( i = 1; i <= CAL_SAMPLES; i++ )); do
+		t0=$(now_ms)
+		session_send "$SCAN_SQL"
+		if ! session_mark "$CAL_DEADLINE"; then
+			calibration_too_slow
+			return 0
+		fi
+		elapsed=$(( $(now_ms) - t0 ))
+		say "  sample $i: ${elapsed} ms"
+		if [ -z "$fastest" ] || [ "$elapsed" -lt "$fastest" ]; then
+			fastest=$elapsed
+		fi
+	done
 
-	elapsed=$(( $(now_ms) - t0 ))
-	DELAY_MS=$(( elapsed / 2 ))
+	DELAY_MS=$(( fastest / 2 ))
 	if [ "$DELAY_MS" -lt "$MIN_DELAY_MS" ]; then
 		DELAY_MS=$MIN_DELAY_MS
 	fi
-	CAL_NOTE="a warm uninterrupted scan took ${elapsed} ms"
+	CAL_NOTE="the fastest of $CAL_SAMPLES warm uninterrupted scans took ${fastest} ms"
 	say "$CAL_NOTE; interrupting ${DELAY_MS} ms into each round"
 }
 

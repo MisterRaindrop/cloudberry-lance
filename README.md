@@ -9,14 +9,18 @@ The wrapper is read-only. It talks to Lance through
 decodes the Arrow batches it returns with a vendored copy of
 [nanoarrow](https://github.com/apache/arrow-nanoarrow).
 
-**State of this build: the DDL surface only.** Servers, user mappings, foreign
-tables and `IMPORT FOREIGN SCHEMA` all work; `SELECT` stops with
+**State of this build: the MPP scan, over the core types.** Servers, user
+mappings, foreign tables, `IMPORT FOREIGN SCHEMA` and `SELECT` all work, and the
+scan runs on every segment. The value converters cover booleans, the integer
+family, `float32`/`float64`, the string family and the binary family; the
+remaining A-tier types (`float16`, `date32`, `timestamp`, `decimal128`,
+`fixed_size_list`, `list`) are still refused, by name, with
 
 ```
-ERROR:  lance_fdw: scan is not implemented in this build
+ERROR:  lance_fdw: column "c_ts_us": Lance type "tsu:" (timestamp) is not supported in this build and cannot be read as timestamp without time zone
 ```
 
-The MPP scan lands in the next change.
+They land in the next change; see [Types](#types).
 
 ## Building
 
@@ -104,6 +108,44 @@ CREATE USER MAPPING FOR CURRENT_USER SERVER lance_s3
 MinIO needs both a region and an endpoint, and `allow_http` unless the endpoint
 is HTTPS.
 
+### How a scan runs
+
+A Lance dataset is a set of *fragments*, and a fragment is the unit of
+parallelism. Under the default `mpp_execute 'all segments'`:
+
+- the coordinator opens the dataset once, pins the version it finds, lists the
+  fragment ids and puts uri, version and ids into the plan it dispatches. It
+  reads no data itself;
+- every segment takes its own share of that list — fragment `i` belongs to
+  segment `(i + session_id % N + command_count) % N` — and opens the dataset at
+  the version the coordinator pinned. The shares are disjoint and together
+  complete, and no segment has to talk to any other to know that;
+- a segment whose share is empty opens nothing at all, which is what a dataset
+  with fewer fragments than segments costs.
+
+Pinning the version is what makes one statement see one snapshot even while the
+dataset is being appended to. Two statements are two snapshots: this is
+statement-level, not transaction-level, unless the table names a `version`.
+
+Only the columns a query refers to are read, including columns that appear only
+in a `WHERE` clause — the wrapper pushes no filter down, so the qualifier is
+evaluated by PostgreSQL but the column still has to arrive. A `count(*)` refers
+to no column and reads none; it counts the rows Lance reports per batch.
+
+`EXPLAIN` adds the resolved uri and the version to the plan, and `EXPLAIN
+ANALYZE` adds the fragment count, since by then the coordinator has looked:
+
+```
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Foreign Scan on events
+         Lance URI: s3://my-bucket/datasets/events.lance
+         Lance Version: latest
+         Lance Fragments: 12
+```
+
+A plain `EXPLAIN` opens nothing, so it costs no round trip to the object store
+and works even against a server whose credentials are wrong.
+
 ### Options
 
 **Foreign data wrapper**
@@ -171,25 +213,34 @@ concurrent sessions, that is the number to plan around: lower `cpu_threads` and
 
 `IMPORT FOREIGN SCHEMA` writes these; a hand-written foreign table may also
 declare a wider type of the same family (an Arrow `int32` may be read into
-`bigint`, for instance).
+`bigint`, for instance). "Readable" is whether this build can produce values
+for the column — the rest import and plan, but refuse at scan time with a
+message naming the column, the Arrow type and the declared type.
 
-| Arrow | PostgreSQL |
-|---|---|
-| `bool` | `boolean` |
-| `int8`, `int16`, `uint8` | `smallint` |
-| `int32`, `uint16` | `integer` |
-| `int64`, `uint32` | `bigint` |
-| `float16`, `float32` | `real` |
-| `float64` | `double precision` |
-| `utf8`, `large_utf8` | `text` |
-| `binary`, `large_binary` | `bytea` |
-| `date32` | `date` |
-| `timestamp(s\|ms\|us\|ns)` without a zone | `timestamp(6)` |
-| `timestamp(s\|ms\|us\|ns)` with a zone | `timestamptz(6)` — the value is a UTC epoch and the zone name is not kept |
-| `decimal128(p,s)` | `numeric(p,s)` |
-| `fixed_size_list<float32, N>` | `real[]` |
-| `fixed_size_list<float64, N>` | `double precision[]` |
-| `list<T>` where T is a scalar above | that type's one-dimensional array |
+| Arrow | PostgreSQL | Readable |
+|---|---|---|
+| `bool` | `boolean` | yes |
+| `int8`, `int16`, `uint8` | `smallint` | yes |
+| `int32`, `uint16` | `integer` | yes |
+| `int64`, `uint32` | `bigint` | yes |
+| `float32` | `real` | yes |
+| `float64` | `double precision` | yes |
+| `utf8`, `large_utf8` | `text` | yes |
+| `binary`, `large_binary` | `bytea` | yes |
+| `float16` | `real` | not yet |
+| `date32` | `date` | not yet |
+| `timestamp(s\|ms\|us\|ns)` without a zone | `timestamp(6)` | not yet |
+| `timestamp(s\|ms\|us\|ns)` with a zone | `timestamptz(6)` — the value is a UTC epoch and the zone name is not kept | not yet |
+| `decimal128(p,s)` | `numeric(p,s)` | not yet |
+| `fixed_size_list<float32, N>` | `real[]` | not yet |
+| `fixed_size_list<float64, N>` | `double precision[]` | not yet |
+| `list<T>` where T is a scalar above | that type's one-dimensional array | not yet |
+
+Widening is allowed only where it cannot lose anything: `int32` into `bigint`
+yes, `int64` into `integer` no — that one is an error at the start of the scan
+rather than a truncated value in the result. `uint32` needs `bigint` for the
+same reason, and a length-limited `varchar(n)` is refused because enforcing the
+limit would mean truncating.
 
 Everything else is B-tier: `uint64`, `struct`, `map`, `dictionary`,
 `duration` and the interval types, `time32`/`time64`, `date64`, `decimal256`,
@@ -214,11 +265,31 @@ bridges the two into the Cloudberry container, since the repository is not
 mounted there:
 
 ```sh
-bash test/gate/gate.sh              # everything
-bash test/gate/gate.sh --suite ddl  # one suite, behind install
-bash test/gate/gate.sh --clean      # after a build-system change
-bash test/gate/reset.sh             # drop schema lance_regress, re-upload fixtures
+bash test/gate/gate.sh                    # everything
+bash test/gate/gate.sh --suite scan_core  # one suite, behind install
+bash test/gate/gate.sh --clean            # after a build-system change
+bash test/gate/reset.sh                   # drop schema lance_regress, re-upload fixtures
 ```
+
+The suites, in the order they run:
+
+| Suite | What it covers |
+|---|---|
+| `install` | the extension's objects, the wrapper's `mpp_execute` default, the GUCs, and the helper functions the other suites use |
+| `ddl` | every option accepted and every bad value rejected, `pg_dump` round trip, `DROP EXTENSION CASCADE` |
+| `import` | `IMPORT FOREIGN SCHEMA` over `file://` and `s3://`, including the B-tier skips |
+| `errors_ddl` | bad path, bucket, credentials and endpoint, seen from `IMPORT` |
+| `scan_core` | values against the pylance reference output, deletions, empty and gapped fragment lists, schema evolution, `batch_size`, `count(*)`, joins both ways, `file://` and `s3://` |
+| `parallel` | the split is complete and disjoint for 1, 2, 3, 7 and 100 fragments; `coordinator` and `any` agree with `all segments` |
+| `snapshot` | version pinning, in both the rows and the fragment count |
+| `explain` | what `EXPLAIN` and `EXPLAIN ANALYZE` say, and that a plain `EXPLAIN` needs no working credentials |
+| `creds` | the user mapping secret is in no plan; the gate then greps the server logs for it |
+| `errors_scan` | storage failures during a scan, and every shape of type mismatch |
+
+After the suites, the gate greps the coordinator and segment logs for the fake
+secret the `creds` suite puts in a user mapping. The only line allowed to
+contain it is the `CREATE USER MAPPING` statement itself, which the server logs
+verbatim like any other DDL.
 
 The gate needs `test/gate/env.sh` (not in the repository) to export
 `LANCE_S3_ENDPOINT_HOST`, `LANCE_S3_ENDPOINT_CONTAINER`, `LANCE_S3_BUCKET`,
@@ -227,11 +298,16 @@ The gate needs `test/gate/env.sh` (not in the repository) to export
 
 ## Known limits
 
-- No scan yet, as above.
+- Eight of the A-tier Arrow families are readable; the other six are named in
+  the type table above and refused rather than guessed at.
 - No filter, limit or vector-search pushdown; every qualifier is evaluated by
   PostgreSQL.
+- Rows are decoded one at a time into `Datum`s. Arrow batches are not handed to
+  the executor as they are, so a scan is correct rather than fast.
 - Fragments are handed to segments round-robin. lance-c exposes no per-fragment
   row count, so a dataset whose fragments differ wildly in size will skew.
+- Cancellation takes effect at a batch boundary, so a single slow read from an
+  object store delays it by however long that read takes.
 - Only the PostgreSQL planner is covered. The test cluster is built
   `--disable-orca`, so the ORCA path is unverified.
 - A panic inside lance-c is reported as an error where lance-c can catch it,

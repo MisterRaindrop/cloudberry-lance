@@ -11,6 +11,7 @@
 #ifndef LANCE_OPTION_H
 #define LANCE_OPTION_H
 
+#include "access/attnum.h"
 #include "nodes/pg_list.h"
 
 typedef struct LanceTableOptions
@@ -37,6 +38,13 @@ extern char *lance_resolve_uri(const char *base_uri, const char *name);
 
 extern void lance_get_table_options(Oid foreigntableid,
 									LanceTableOptions *opts);
+
+/*
+ * The Lance column name behind one attribute: the column_name option when the
+ * table sets one, the attribute name otherwise.
+ */
+extern char *lance_get_column_name(Oid foreigntableid, AttrNumber attnum,
+								   const char *attname);
 
 /*
  * Object-store options for lance_dataset_open(), as the NULL-terminated

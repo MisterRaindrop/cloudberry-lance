@@ -40,6 +40,18 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ENV_FILE="$ROOT/test/gate/env.sh"
 FIXTURE_DIR="$ROOT/test/fixtures/data"
 
+# The fake secret test/regress/sql/creds.sql puts in a user mapping.  After the
+# suites have run, it may appear in a server log only on the line that carries
+# the CREATE USER MAPPING statement itself, which the server echoes like any
+# other DDL (AC8).
+CREDS_CANARY=LANCE_CANARY_SECRET_9f3a
+CLUSTER_LOGS=(
+	/home/gpadmin/demo/datadirs/qddir/demoDataDir-1/log
+	/home/gpadmin/demo/datadirs/dbfast1/demoDataDir0/log
+	/home/gpadmin/demo/datadirs/dbfast2/demoDataDir1/log
+	/home/gpadmin/demo/datadirs/dbfast3/demoDataDir2/log
+)
+
 DO_CLEAN=no
 DO_SYNC=yes
 DO_FIXTURES=yes
@@ -99,7 +111,7 @@ done
 # Every suite depends on "install" having created the extension and the
 # lance_regress schema, so a single suite always runs behind it.
 if [ -z "$SUITE" ]; then
-	SUITES="install ddl import errors_ddl"
+	SUITES="install ddl import errors_ddl scan_core parallel snapshot explain creds errors_scan"
 elif [ "$SUITE" = install ]; then
 	SUITES="install"
 else
@@ -318,10 +330,57 @@ fi
 "
 }
 
+# ---------------------------------------------------------------------------
+# AC8: the user mapping secret must not have reached a server log
+#
+# The suite itself checks the plan; only the server can say what ended up in
+# its log, and only after the statements that could have put it there have run.
+# ---------------------------------------------------------------------------
+check_credential_leak() {
+	case " $SUITES " in
+		*" creds "*) ;;
+		*)
+			say "skipping the credential log check (the creds suite did not run)"
+			return 0
+			;;
+	esac
+
+	say "checking the coordinator and segment logs for the user mapping secret"
+	remote "
+found=no
+leaked=no
+for dir in ${CLUSTER_LOGS[*]}; do
+	[ -d \"\$dir\" ] || continue
+	for f in \"\$dir\"/*.csv; do
+		[ -f \"\$f\" ] || continue
+		found=yes
+		# The CREATE USER MAPPING statement is logged verbatim and is written
+		# on one line for exactly this reason; anything else is a leak.
+		hits=\$(grep -h ${CREDS_CANARY} \"\$f\" | grep -v 'CREATE USER MAPPING' || true)
+		if [ -n \"\$hits\" ]; then
+			leaked=yes
+			echo \"leak in \$f:\"
+			printf '%s\\n' \"\$hits\" | head -5
+		fi
+	done
+done
+if [ \"\$found\" = no ]; then
+	echo 'no server log files found - the credential check did not run' >&2
+	exit 1
+fi
+if [ \"\$leaked\" = yes ]; then
+	echo 'AC8: the user mapping secret reached a server log' >&2
+	exit 1
+fi
+echo 'credential check: the secret appears only in the CREATE USER MAPPING statement'
+"
+}
+
 say "container=$CONTAINER remote=$REMOTE suites='$SUITES'"
 prepare_fixtures
 sync_tree
 sync_fixtures
 ensure_cargo_inputs
 build_and_test
+check_credential_leak
 say "PASS"

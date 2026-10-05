@@ -76,6 +76,7 @@ typedef struct LanceScanState
 	int64		batch_len;
 	int64		batch_row;
 	int64		batch_offset;
+	int64		vmem_reserved;	/* Arrow bytes on the vmem ledger for `batch` */
 
 	LanceConverter *converters; /* ncolumns entries */
 
@@ -101,6 +102,9 @@ lance_scan_cleanup(void *arg)
 		LANCE_MASKED(state->batch.release(&state->batch));
 		state->batch.release = NULL;
 	}
+
+	lance_rt_vmem_release(state->vmem_reserved);
+	state->vmem_reserved = 0;
 
 	if (state->schema.release != NULL)
 	{
@@ -301,7 +305,7 @@ lance_scan_make_scanner(LanceScanState *state)
 	LANCE_CHECK(state->scanner != NULL, state->uri);
 	state->sc_handle = lance_rt_track_scanner(state->scanner);
 
-	/* Both of these have to be set before a stream is taken. */
+	/* Every one of these has to be set before a stream is taken. */
 	LANCE_MASKED(rc = lance_scanner_set_fragment_ids(state->scanner, state->ids,
 													 (size_t) state->nids));
 	LANCE_CHECK(rc == 0, state->uri);
@@ -310,6 +314,34 @@ lance_scan_make_scanner(LanceScanState *state)
 	{
 		LANCE_MASKED(rc = lance_scanner_set_batch_size(state->scanner,
 													   state->opts.batch_size));
+		LANCE_CHECK(rc == 0, state->uri);
+	}
+
+	/*
+	 * A row count is a poor memory bound when the rows are wide, and Lance
+	 * rows can be very wide: a thousand rows of int4 is kilobytes, a thousand
+	 * 1024-dimension vectors is megabytes.  The byte limit is the one that
+	 * bounds memory; the options validator refuses both at once because lance
+	 * would let this one win silently.
+	 */
+	if (state->opts.batch_size_bytes > 0)
+	{
+		LANCE_MASKED(rc = lance_scanner_set_batch_size_bytes(state->scanner,
+															 (uint64) state->opts.batch_size_bytes));
+		LANCE_CHECK(rc == 0, state->uri);
+	}
+
+	if (lance_io_buffer_size_mb > 0)
+	{
+		LANCE_MASKED(rc = lance_scanner_set_io_buffer_size(state->scanner,
+														   (uint64) lance_io_buffer_size_mb * 1024 * 1024));
+		LANCE_CHECK(rc == 0, state->uri);
+	}
+
+	if (lance_batch_readahead > 0)
+	{
+		LANCE_MASKED(rc = lance_scanner_set_batch_readahead(state->scanner,
+															(size_t) lance_batch_readahead));
 		LANCE_CHECK(rc == 0, state->uri);
 	}
 }
@@ -716,6 +748,9 @@ lance_scan_release_batch(LanceScanState *state)
 		state->batch.release = NULL;
 	}
 
+	lance_rt_vmem_release(state->vmem_reserved);
+	state->vmem_reserved = 0;
+
 	state->batch_len = 0;
 	state->batch_row = 0;
 	state->batch_offset = 0;
@@ -777,6 +812,22 @@ lance_scan_next_batch(LanceScanState *state)
 	for (i = 0; i < state->ncolumns; i++)
 		lance_arrow_converter_set_array(&state->converters[i],
 										state->batch.children[i]);
+
+	/*
+	 * Only now can the batch be measured, and only now can the database be
+	 * told it exists: lance allocated it outside palloc, so until this point
+	 * the resource group and gp_vmem_protect_limit see a backend holding
+	 * nothing.  If the reservation fails nothing was charged, and the batch
+	 * itself is freed by the scan context's reset callback on the way out.
+	 */
+	{
+		int64		bytes = 0;
+
+		for (i = 0; i < state->ncolumns; i++)
+			bytes += lance_arrow_converter_bytes(&state->converters[i]);
+
+		state->vmem_reserved = lance_rt_vmem_reserve(bytes, state->uri);
+	}
 
 	state->batch_len = state->batch.length;
 	state->batch_row = 0;

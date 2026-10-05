@@ -1963,6 +1963,52 @@ lance_arrow_resolve_converter(const struct ArrowSchema *field, Oid pgtypid,
 						out);
 }
 
+/*
+ * Sum the buffers a view can reach.
+ *
+ * This is memory lance allocated on the Rust side, which palloc knows nothing
+ * about; the only reason to measure it is to hand the number to the vmem
+ * tracker.  It is a floor rather than the whole truth - lance may hold pages
+ * and readahead batches behind these buffers - and a floor measured from the
+ * data is worth more here than a guess with a multiplier on it.
+ */
+static int64
+lance_arrow_view_bytes(const struct ArrowArrayView *view)
+{
+	int64		bytes = 0;
+	int			i;
+	int64		c;
+
+	if (view == NULL)
+		return 0;
+
+	/*
+	 * nanoarrow spells "size not known yet" as -1, and a buffer the layout
+	 * does not use keeps whatever it was initialised to.  Adding either would
+	 * shrink the total, and a total that reached zero would skip the
+	 * reservation without a word, so only real sizes are counted.
+	 */
+	for (i = 0; i < NANOARROW_MAX_FIXED_BUFFERS; i++)
+		if (view->buffer_views[i].size_bytes > 0)
+			bytes += (int64) view->buffer_views[i].size_bytes;
+
+	/* string_view / binary_view keep their data outside the fixed buffers. */
+	for (i = 0; i < view->n_variadic_buffers; i++)
+		if (view->variadic_buffer_sizes[i] > 0)
+			bytes += view->variadic_buffer_sizes[i];
+
+	for (c = 0; c < view->n_children; c++)
+		bytes += lance_arrow_view_bytes(view->children[c]);
+
+	return bytes + lance_arrow_view_bytes(view->dictionary);
+}
+
+int64
+lance_arrow_converter_bytes(const LanceConverter *conv)
+{
+	return conv == NULL ? 0 : lance_arrow_view_bytes(&conv->view);
+}
+
 void
 lance_arrow_converter_set_array(LanceConverter *conv,
 								const struct ArrowArray *array)

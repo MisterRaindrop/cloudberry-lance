@@ -21,16 +21,33 @@ extern int	lance_cpu_threads;
 extern int	lance_io_threads;
 extern int	lance_index_cache_mb;
 extern int	lance_metadata_cache_mb;
+extern int	lance_io_buffer_size_mb;
+extern int	lance_batch_readahead;
+extern bool lance_track_memory;
 
 /*
- * Filter pushdown, on by default (DESIGN D6).  Unlike the four above this one
- * is PGC_USERSET and is read at *planning* time, on every plan - so it only
+ * Filter pushdown, on by default (DESIGN D6).  Alone among the GUCs here it is
+ * PGC_USERSET, and it is read at *planning* time, on every plan - so it only
  * ever matters on the QD, and the value a segment has is irrelevant.  Its
  * assign hook resets the plan cache, because a cached generic plan has already
  * dropped the local quals and frozen the filter: without that reset a SET
  * would silently fail to take effect on a pooled or prepared statement.
  */
 extern bool lance_enable_filter_pushdown;
+
+/*
+ * Arrow batches are allocated by lance on the Rust side, so palloc, the
+ * resource group and gp_vmem_protect_limit all see a backend that looks nearly
+ * idle while it holds them.  These put the bytes on the same ledger as the
+ * rest, which is what turns being killed by the OOM killer into an ordinary
+ * "out of memory" error.  Reserve returns the bytes it actually took, 0 when
+ * tracking is off, and ereports when the limit is reached; every reserve needs
+ * exactly one release, error paths included.
+ */
+extern int64 lance_rt_vmem_reserve(int64 bytes, const char *uri);
+extern void lance_rt_vmem_release(int64 bytes);
+extern int64 lance_rt_vmem_reserved(void);
+extern int64 lance_rt_vmem_peak(void);
 
 extern void lance_rt_define_gucs(void);
 

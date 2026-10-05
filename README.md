@@ -266,6 +266,7 @@ the gate's credential check allows exactly that one line and nothing else.
 | `uri` | Required. Either absolute (`s3://...`, `file:///...`, `/abs/path`) or relative to the server's `base_uri`. |
 | `version` | Dataset version to read. `0`, the default, means the latest at the time the statement runs. |
 | `batch_size` | Rows per Arrow batch. Unset means lance-c decides, which is 8192 rows unless its own `LANCE_DEFAULT_BATCH_SIZE` says otherwise. Lower it for datasets with large binary columns. |
+| `batch_size_bytes` | Bytes per Arrow batch, the bound a row count cannot give. Cannot be combined with `batch_size`: lance lets the byte limit win, so taking both would ignore one without saying so. See [Bounding memory](#bounding-memory). |
 | `rows_hint` | Row estimate for the planner. Default 100000. Planning does no I/O, so this is the only way the planner can know better. |
 | `mpp_execute` | Overrides the server's setting. |
 | `num_segments` | Read by Cloudberry rather than by this wrapper, and it matters only under `mpp_execute 'all segments'`: there it narrows how many segments run the scan, the fragment split follows it, and a value above the number of segments in the cluster is refused, because such a gang repeats a segment and the two copies cannot be told apart. Under `coordinator` or `any` it has no effect and nothing is refused — one process reads every fragment, so there is no split to narrow. |
@@ -284,15 +285,86 @@ the gate's credential check allows exactly that one line and nothing else.
 | `lance_fdw.io_threads` | 0 | `LANCE_IO_THREADS`; same. |
 | `lance_fdw.index_cache_size_mb` | 64 | Per-backend Lance index cache. lance's own default is 6 GiB, which is far too much for one cache per backend. |
 | `lance_fdw.metadata_cache_size_mb` | 32 | Per-backend Lance metadata cache. lance's own default is 1 GiB. |
+| `lance_fdw.io_buffer_size_mb` | 0 | Bound on the I/O one scan buffers from storage; 0 leaves lance-c at its own default. Bounds buffered reads, not everything a scan allocates. |
+| `lance_fdw.batch_readahead` | 0 | Batches decoded concurrently by one scan; 0 leaves lance-c at its own default. Multiplies whatever one batch costs. |
+| `lance_fdw.track_memory` | `on` | Charge Arrow batches to Cloudberry's memory accounting, so the resource group and `gp_vmem_protect_limit` can see them. See [Bounding memory](#bounding-memory). |
 | `lance_fdw.enable_filter_pushdown` | `on` | Push qualifiers down to Lance where the two systems are known to agree exactly. See [Filter pushdown](#filter-pushdown). |
 
-The first four are `SUSET` and are read once per backend, before its first call
-into lance-c, so changing them mid-session has no effect on that session.
+Every one of these but `enable_filter_pushdown` is `SUSET`, and they differ only
+in when they are read. The thread counts and cache sizes are read once per
+backend, before its first call into lance-c, so changing them mid-session has no
+effect on that session. The memory bounds and `track_memory` are read later,
+once per scan as it opens, so a `SET` reaches the next scan in the same backend.
 
 `enable_filter_pushdown` is different in every one of those respects: it is
 `USERSET`, it is read at **planning** time on every plan, and changing it resets
 the plan cache so that cached plans stop pushing down at once. It therefore only
 ever matters on the coordinator; the value a segment has is irrelevant.
+
+### Bounding memory
+
+A batch is the unit this wrapper decodes and holds, so bounding a scan means
+bounding a batch. `batch_size` counts **rows**, which is a poor bound whenever
+rows vary in width — and Lance rows vary a lot. The same 1024-row batch is a
+few kilobytes of `int4`, about four megabytes of 1024-dimension `float32`
+vectors, and unbounded once a blob column is in it. `batch_size_bytes` is the
+bound that does not depend on the schema, which is why lance lets it take
+precedence over the row count, and why setting both is refused here rather than
+letting one of them be ignored in silence.
+
+Two more bounds are per-backend GUCs rather than table options, because they
+limit what one process may hold, not what one dataset looks like:
+`lance_fdw.io_buffer_size_mb` caps the I/O a scan buffers from storage, and
+`lance_fdw.batch_readahead` caps how many batches it decodes at once.
+
+What one backend can hold during a scan is therefore roughly
+
+    batch bytes x (1 + batch_readahead)  +  io_buffer_size
+
+and under `mpp_execute 'all segments'` **every segment on the host holds that at
+the same time**, so multiply by the segments per host to get what the machine
+sees. None of the three is a hard allocator limit — `io_buffer_size` bounds
+buffered reads, not everything a scan allocates — so treat the formula as the
+shape of the growth, not a ceiling the kernel will enforce.
+
+**The database cannot see this memory on its own.** A batch is allocated by
+lance on the Rust side, not by `palloc`, so `gp_vmem_protect_limit`, the
+resource group and the runaway detector all read a backend that looks nearly
+idle while it holds hundreds of megabytes — and the OOM killer is what notices
+instead. With `lance_fdw.track_memory` on, every batch is measured once its
+Arrow buffers are bound and charged to the same ledger as everything else, so
+running out becomes an ordinary `out of memory` error naming the knob to turn,
+rather than a killed process.
+
+Two honest limits on that number. It is charged **after** lance allocated: the
+Arrow C Data Interface offers no way to ask first, so this detects rather than
+prevents, and what bounds the overshoot is `batch_size_bytes`. And it counts
+the buffers of the batch actually held — lance's readahead batches and the
+pages behind them are not visible to it, so the figure is a floor rather than
+the whole footprint.
+
+One consequence surprises people: a query whose target list names no column of
+the foreign table — `SELECT count(*)`, or a scan feeding only a function that
+does not read one — projects nothing, so it reads no Arrow buffer and is
+charged nothing. A ledger reading zero there is the projection pushdown
+working, not the accounting failing.
+
+`lance_fdw_memory()` reports two figures. `current_bytes` is what this backend
+has on the ledger right now; it is zero between scans, and staying zero is the
+property worth watching, because a reservation released twice or not at all
+only shows up later, as an unrelated allocation being refused. `peak_bytes` is
+its high-water mark since the backend started, and it is the one to size the
+bounds against — a batch is held only between one row-producing call and the
+next, so anything asking for the current value almost always finds zero. `lance_fdw_cache_stats()` reports hits, misses,
+entries and bytes for the two caches above, which is the only way to size them
+on evidence. Both are backend-local: on a segment they describe that segment's
+process.
+
+All three bounds default to leaving lance-c at its own defaults, so nothing
+changes until one is set. The two GUCs are read once per scan as it opens, so a `SET`
+reaches the next scan in the same backend; a segment reads its own value, which
+means a cluster-wide bound belongs in `postgresql.conf` rather than in a session
+`SET`.
 
 ### Deploying
 

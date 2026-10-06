@@ -53,12 +53,13 @@ OBJS = \
 	src/lance_dispatch.o \
 	src/lance_scan.o \
 	src/lance_import.o \
+	src/lance_vector.o \
 	third_party/nanoarrow/src/nanoarrow.o
 
 # "install" first: it creates the extension and the lance_feature schema every
 # other suite builds on.  test/run/run.sh keeps the same list.
 REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
-	pushdown pushdown_errors \
+	pushdown pushdown_errors vector \
 	creds errors_scan types types_errors types_nested types_nested_errors \
 	sigmask
 REGRESS_OPTS = --inputdir=test/feature --outputdir=test/feature

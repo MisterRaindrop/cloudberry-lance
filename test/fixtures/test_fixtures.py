@@ -43,6 +43,8 @@ FROZEN_NAMES = [
     "evolved", "blob", "large_text", "versions", "strict",
     # A1: struct / map / blob v2, for A2 to read against.
     "nested", "nested_btier", "maps", "blobv2",
+    # Vector Top-K.
+    "vectors", "vectors_idx", "vectors_nulls",
 ]
 
 #: Every A-tier Arrow type of DESIGN §2 has to appear in types_all.  Losing a
@@ -69,7 +71,12 @@ def entry(manifest, name):
     return manifest["datasets"][name]
 
 
+#: Datasets that hold another dataset's rows and so share its reference.
+SHARED_EXPECTED = {"vectors_idx": "vectors"}
+
+
 def expected_lines(fixtures_root, name):
+    name = SHARED_EXPECTED.get(name, name)
     with open(os.path.join(fixtures_root, "expected", "%s.jsonl" % name)) as fh:
         return fh.readlines()
 
@@ -149,7 +156,10 @@ def test_expected_has_one_line_per_row(manifest, opened, fixtures_root, name):
     e = entry(manifest, name)
     lines = expected_lines(fixtures_root, name)
     assert len(lines) == opened(name).count_rows()
-    assert len(lines) == e["expected_rows"]
+    if name in SHARED_EXPECTED:
+        assert e["expected"] is None and e["expected_rows"] is None
+    else:
+        assert len(lines) == e["expected_rows"]
 
 
 @pytest.mark.parametrize("name", FROZEN_NAMES)
@@ -158,7 +168,7 @@ def test_expected_is_what_pylance_reads_back(manifest, opened, fixtures_root, na
     rows, encodings = gen.encode_table(opened(name).to_table())
     on_disk = "".join(expected_lines(fixtures_root, name))
     assert gen.dump_expected(rows) == on_disk
-    for col in entry(manifest, name)["schema"]:
+    for col in entry(manifest, SHARED_EXPECTED.get(name, name))["schema"]:
         assert encodings[col["name"]] == col["expected_encoding"], col["name"]
 
 
@@ -432,6 +442,22 @@ def test_blobv2_column_is_refused_whatever_it_holds(manifest, opened):
 # --------------------------------------------------------------------------
 # the generator itself
 # --------------------------------------------------------------------------
+
+def test_vectors_idx_is_vectors_with_an_l2_ivf_pq_index(opened):
+    """Same rows, plus the index the vector suite's approximate cases need."""
+    plain, indexed = opened("vectors"), opened("vectors_idx")
+    assert indexed.to_table() == plain.to_table()
+    assert plain.list_indices() == []
+    [index] = indexed.list_indices()
+    assert index["fields"] == ["emb"]
+    assert index["type"] == "IVF_PQ"
+
+
+def test_vectors_nulls_has_null_and_zero_vectors(opened):
+    emb = opened("vectors_nulls").to_table().column("emb").to_pylist()
+    assert [i for i, v in enumerate(emb) if v is None] == [2, 4, 8]
+    assert [i for i, v in enumerate(emb) if v == [0.0] * 4] == [5]
+
 
 def test_regeneration_is_byte_identical(manifest, fixtures_root, regenerated):
     other_root, other = regenerated

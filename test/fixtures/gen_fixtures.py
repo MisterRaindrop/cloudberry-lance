@@ -884,6 +884,98 @@ def build_blobv2() -> Built:
                "size, so the expected file records offsets rather than data"])
 
 
+#: Vector Top-K fixtures (vector Top-K DESIGN, AC9-AC12).  Twelve clusters of
+#: eighty points in eight dimensions: real embeddings cluster, and an IVF index
+#: on structureless noise says nothing about recall (PROBE-Q4).
+VECTOR_DIM = 8
+VECTOR_CLUSTERS = 12
+VECTOR_PER_CLUSTER = 80
+VECTOR_PQ_SUB_VECTORS = 4
+
+
+def det_unit(seed: str) -> float:
+    """A deterministic float in [-1, 1), from a hash rather than an RNG."""
+    word = int.from_bytes(hashlib.sha256(seed.encode("utf-8")).digest()[:4], "big")
+    return word / 2.0 ** 31 - 1.0
+
+
+def vector_points() -> tuple[list[int], list[list[float]]]:
+    """Category and float32-exact coordinates of every row of ``vectors``."""
+    centres = [[det_unit("centre/%d/%d" % (c, d)) * 10.0 for d in range(VECTOR_DIM)]
+               for c in range(VECTOR_CLUSTERS)]
+    cats, points = [], []
+    for i in range(VECTOR_CLUSTERS * VECTOR_PER_CLUSTER):
+        c = i % VECTOR_CLUSTERS
+        p = [centres[c][d] + det_unit("point/%d/%d" % (i, d)) * 0.8
+             for d in range(VECTOR_DIM)]
+        cats.append(i % 5)
+        points.append([float(v) for v in np.array(p, dtype=np.float32)])
+    return cats, points
+
+
+def _vector_table() -> pa.Table:
+    cats, points = vector_points()
+    n = len(points)
+    flat = pa.array([v for p in points for v in p], pa.float32())
+    schema = pa.schema([
+        pa.field("id", pa.int32(), nullable=False),
+        pa.field("cat", pa.int32()),
+        pa.field("emb", pa.list_(pa.float32(), VECTOR_DIM)),
+    ])
+    return pa.table({
+        "id": pa.array(range(n), pa.int32()),
+        "cat": pa.array(cats, pa.int32()),
+        "emb": pa.FixedSizeListArray.from_arrays(flat, VECTOR_DIM),
+    }, schema=schema)
+
+
+def build_vectors() -> Built:
+    return Built(
+        purpose="Vector Top-K without an index: %d clustered %d-dimensional "
+                "float32 embeddings over 4 fragments, cat = id %% 5.  Lance "
+                "searches it exhaustively, so the pushed-down result has to be "
+                "the exact one." % (VECTOR_CLUSTERS * VECTOR_PER_CLUSTER, VECTOR_DIM),
+        table=_vector_table(), max_rows_per_file=240)
+
+
+def build_vectors_idx() -> Built:
+    def post(ds, uri):
+        ds.create_index("emb", index_type="IVF_PQ", metric="L2",
+                        num_partitions=VECTOR_CLUSTERS,
+                        num_sub_vectors=VECTOR_PQ_SUB_VECTORS)
+    return Built(
+        purpose="The rows of vectors.lance with an IVF_PQ index on emb, trained "
+                "with the L2 metric: approximate search, recall, index use and "
+                "the metric-mismatch fallback to an exhaustive search.",
+        table=_vector_table(), max_rows_per_file=240, post=post,
+        has_expected=False,
+        notes=["same rows as vectors.lance, so no expected file of its own",
+               "IVF k-means training is not byte-reproducible; only the data and "
+               "the manifest entry are, and the suites assert recall bounds, "
+               "never which approximate rows come back"])
+
+
+def build_vectors_nulls() -> Built:
+    emb = [[1, 0, 0, 0], [2, 0, 0, 0], None, [3, 0, 0, 0], None,
+           [0, 0, 0, 0], [0, 1, 0, 0], [0, 2, 0, 0], None, [0, 0, 1, 0]]
+    n = len(emb)
+    return Built(
+        purpose="NULL and zero vectors: the NULL tail the exact path returns and "
+                "a nearest-neighbour search does not, and a zero row that has no "
+                "cosine distance.",
+        table=pa.table({
+            "id": pa.array(range(n), pa.int32()),
+            "cat": pa.array([i % 2 for i in range(n)], pa.int32()),
+            "emb": pa.array(emb, pa.list_(pa.float32(), 4)),
+        }, schema=pa.schema([
+            pa.field("id", pa.int32(), nullable=False),
+            pa.field("cat", pa.int32()),
+            pa.field("emb", pa.list_(pa.float32(), 4)),
+        ])),
+        max_rows_per_file=5,
+        notes=["ids 2, 4 and 8 have a NULL vector; id 5 is the zero vector"])
+
+
 def build_big(fragments: int, rows_per_fragment: int, blob_bytes: int) -> Callable[[], Built]:
     """AC5 timing fixture: not deterministic, not byte-compared, opt-in."""
     def build() -> Built:
@@ -936,6 +1028,10 @@ BUILDERS: dict[str, Callable[[], Built]] = {
     "nested_btier": build_nested_btier,
     "maps": build_maps,
     "blobv2": build_blobv2,
+    # Vector Top-K, appended for the same reason.
+    "vectors": build_vectors,
+    "vectors_idx": build_vectors_idx,
+    "vectors_nulls": build_vectors_nulls,
 }
 
 BIG = "big"

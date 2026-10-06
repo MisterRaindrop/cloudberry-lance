@@ -148,7 +148,7 @@ done
 # Every suite depends on "install" having created the extension and the
 # lance_feature schema, so a single suite always runs behind it.
 if [ -z "$SUITE" ]; then
-	SUITES="install ddl import errors_ddl scan_core parallel snapshot explain pushdown pushdown_errors creds errors_scan types types_errors types_nested types_nested_errors sigmask"
+	SUITES="install ddl import errors_ddl scan_core parallel snapshot explain pushdown pushdown_errors vector creds errors_scan types types_errors types_nested types_nested_errors sigmask"
 elif [ "$SUITE" = install ]; then
 	SUITES="install"
 else
@@ -438,6 +438,95 @@ echo 'credential check: all three credentials appear only in the CREATE USER MAP
 }
 
 # ---------------------------------------------------------------------------
+# Vector Top-K: what only the segments can tell (vector Top-K AC8, AC11, AC12)
+#
+# Which segment searched, whether the others stayed away from the object store,
+# and whether the search used the index are said in DEBUG messages on the QEs.
+# pg_regress cannot compare those - the interconnect logs at the same levels and
+# every line carries a segment, a pid and an address - so they are read here
+# from psql's stderr instead, keeping only the wrapper's own lines.
+# ---------------------------------------------------------------------------
+check_vector_trace() {
+	case " $SUITES " in
+		*" vector "*) ;;
+		*)
+			say "skipping the vector trace check (the vector suite did not run)"
+			return 0
+			;;
+	esac
+
+	say "checking which segments searched and whether the index was used"
+	local body
+	body=$(cat <<'BODY'
+data="$REMOTE/test/fixtures/data"
+nseg=$(psql -X -At -p "$QD_PORT" -d contrib_regression \
+	-c "SELECT count(*) FROM gp_segment_configuration WHERE role = 'p' AND content >= 0")
+
+# Run one statement with DEBUG2 on, keep the wrapper's lines.  A SET reaches
+# the segments only once this session has a gang to send it to, so a
+# distributed statement goes first.
+trace() {
+	psql -X -q -At -p "$QD_PORT" -d contrib_regression -v ON_ERROR_STOP=1 \
+		-c "SELECT count(*) FROM gp_dist_random('gp_id')" \
+		-c 'SET client_min_messages = debug2' "$@" 2>&1 >/dev/null |
+		grep -o 'lance_fdw: .*' || true
+}
+fail() { echo "vector trace: $*" >&2; exit 1; }
+
+psql -X -q -p "$QD_PORT" -d contrib_regression -v ON_ERROR_STOP=1 <<SQL
+CREATE SERVER vt_files FOREIGN DATA WRAPPER lance_fdw OPTIONS (base_uri '$data');
+CREATE FOREIGN TABLE lance_feature.vt (id integer, cat integer, emb real[])
+  SERVER vt_files OPTIONS (uri 'vectors.lance');
+CREATE FOREIGN TABLE lance_feature.vt_idx (id integer, cat integer, emb real[])
+  SERVER vt_files OPTIONS (uri 'vectors_idx.lance');
+SQL
+trap 'psql -X -q -p "$QD_PORT" -d contrib_regression -c "DROP SERVER vt_files CASCADE" >/dev/null 2>&1 || true' EXIT
+
+# check LABEL WANT_INDEX SQL...: one segment searched, the others skipped
+# without opening the dataset, and index_comparisons is > 0 or == 0.
+check() {
+	local label=$1 want=$2 lines search seg comps opened skipped
+	shift 2
+	lines=$(trace "$@")
+	search=$(printf '%s\n' "$lines" | grep '^lance_fdw: vector search of' || true)
+	[ "$(printf '%s\n' "$search" | grep -c 'vector search of')" = 1 ] ||
+		fail "$label: expected exactly one search, got: $lines"
+	seg=$(printf '%s\n' "$search" | sed -E 's/.* on segment (-?[0-9]+):.*/\1/')
+	comps=$(printf '%s\n' "$search" | sed -E 's/.*index_comparisons ([0-9]+).*/\1/')
+	skipped=$(printf '%s\n' "$lines" | grep -c 'not the search segment, skipping' || true)
+	[ "$skipped" = $((nseg - 1)) ] ||
+		fail "$label: $skipped segment(s) skipped, expected $((nseg - 1))"
+	opened=$(printf '%s\n' "$lines" | grep 'open dataset' |
+		sed -E 's/.* on segment (-?[0-9]+)( .*)?$/\1/' | sort -u | tr '\n' ' ')
+	for o in $opened; do
+		[ "$o" = -1 ] || [ "$o" = "$seg" ] ||
+			fail "$label: segment $o opened the dataset but segment $seg searched"
+	done
+	# An if, not a case: case patterns inside $(...) trip bash 3.2's parser.
+	if [ "$want" = index ]; then
+		[ "$comps" -gt 0 ] || fail "$label: index_comparisons is $comps, the index was not used"
+	else
+		[ "$comps" = 0 ] || fail "$label: index_comparisons is $comps, expected an exhaustive search"
+	fi
+	echo "vector trace: $label: segment $seg searched, $skipped skipped, opened on [ $opened], index_comparisons $comps"
+}
+
+check 'L2 on the index' index \
+	-c "SELECT id FROM lance_feature.vt_idx WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
+check 'no index' noindex \
+	-c "SELECT id FROM lance_feature.vt WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
+check 'cosine on an L2 index' noindex \
+	-c "SELECT id FROM lance_feature.vt_idx WHERE cat = 2 ORDER BY emb <=> '{1,2,3,4,5,6,7,8}' LIMIT 5"
+check 'nprobes set with SET LOCAL' index \
+	-c 'BEGIN' -c 'SET LOCAL lance_fdw.nprobes = 2' \
+	-c "SELECT id FROM lance_feature.vt_idx ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5" \
+	-c 'COMMIT'
+BODY
+)
+	remote "$body"
+}
+
+# ---------------------------------------------------------------------------
 # --stability: prove the stability scripts run, not that the invariants hold
 #
 # The full runs are minutes to hours and their subject is behaviour under
@@ -476,5 +565,6 @@ sync_fixtures
 ensure_cargo_inputs
 build_and_test
 check_credential_leak
+check_vector_trace
 run_stability
 say "PASS"

@@ -18,11 +18,14 @@
 #
 # test/stability/leak_loop.sh - AC7: a thousand failed scans in one session.
 #
-# One psql session, and in it three failing statements per round: a scan of a
+# One psql session, and in it four failing statements per round: a scan of a
 # uri that is not there, a scan of an S3 dataset with credentials that are
-# wrong, and a scan that refers to a B-tier column.  All three take the
-# wrapper's error path, and the error path is where a dataset handle, an Arrow
-# stream or a file descriptor would be left behind (I6).  Every so many rounds
+# wrong, a scan that refers to a B-tier column, and a vector Top-K search of a
+# uri that is not there.  All four take the wrapper's error path, and the error
+# path is where a dataset handle, an Arrow stream or a file descriptor would be
+# left behind (I6).  Each round also runs one vector Top-K search that
+# succeeds, on a 'coordinator' table so that the search runs in the sampled
+# backend itself (vector Top-K AC20).  Every so many rounds
 # the session's backend is sampled through /proc: how many file descriptors it
 # holds, how much resident memory it has, how many threads it runs and how many
 # QE processes its session has.  The first and last samples are what decides

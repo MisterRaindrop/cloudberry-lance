@@ -24,9 +24,9 @@
 DID_SETUP=no
 FAILURES=0
 GP_SESSION_ID=
-KINDS=3
+KINDS=4
 if [ "$SKIP_S3" = yes ]; then
-	KINDS=2
+	KINDS=3
 fi
 
 teardown() {
@@ -57,13 +57,29 @@ trap cleanup EXIT
 setup() {
 	[ -d "$FIXTURE_DIR" ] ||
 		die "no fixture directory $FIXTURE_DIR in the container; test/run/run.sh puts one there"
-	for name in types_b frag_3; do
+	for name in types_b frag_3 vectors_idx; do
 		[ -d "$FIXTURE_DIR/$name.lance" ] ||
 			die "$FIXTURE_DIR/$name.lance is missing; run test/run/run.sh to sync the fixtures"
 	done
 
 	ensure_db "$DB"
 	DID_SETUP=yes
+
+	# 0.1 gained the vector operators without a new version, so a database
+	# that installed the extension before them still has it without them, and
+	# CREATE EXTENSION IF NOT EXISTS below would not add them.  Dropping the
+	# extension here would take whatever else depends on it in a database this
+	# script may not own, so say so instead.
+	STALE=$(psql_val "$DB" <<'SQL'
+SELECT count(*) FROM pg_extension e
+ WHERE e.extname = 'lance_fdw'
+   AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                    WHERE d.refobjid = e.oid AND d.deptype = 'e'
+                      AND d.classid = 'pg_operator'::regclass);
+SQL
+	)
+	[ "$STALE" = 0 ] ||
+		die "lance_fdw in database $DB predates the vector operators; run DROP EXTENSION lance_fdw CASCADE there, or pass --db with a new database"
 
 	psql_run "$DB" <<SQL
 DROP SERVER IF EXISTS lance_stability_files CASCADE;
@@ -90,6 +106,15 @@ CREATE FOREIGN TABLE lance_feature.leak_badpath (id integer, v text)
 -- And one that has to work, at the end, in the same session.
 CREATE FOREIGN TABLE lance_feature.leak_good (id integer, v text, n bigint)
   SERVER lance_stability_files OPTIONS (uri 'frag_3.lance');
+-- Vector Top-K (AC20).  Under 'coordinator' the nearest-neighbour search runs
+-- in this very backend - the one being sampled - so the scanner, the statistics
+-- callback and the converters of a search are all inside the measurement; on
+-- the default 'all segments' they would run on a QE nobody samples.  This one
+-- succeeds every round; the next one fails every round, at the open.
+CREATE FOREIGN TABLE lance_feature.leak_topk (id integer, cat integer, emb real[])
+  SERVER lance_stability_files OPTIONS (uri 'vectors_idx.lance', mpp_execute 'coordinator');
+CREATE FOREIGN TABLE lance_feature.leak_topk_bad (id integer, cat integer, emb real[])
+  SERVER lance_stability_nopath OPTIONS (uri 'nope.lance');
 SQL
 
 	if [ "$SKIP_S3" != yes ]; then
@@ -134,8 +159,10 @@ sample() {
 		"$label" "$fd" "$rss" "$threads" "$qe"
 }
 
-# One round: every statement in it has to fail.
+# One round: every statement in it but the vector search has to fail.
 send_round() {
+	session_send "SELECT id FROM lance_feature.leak_topk WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5;"
+	session_send "SELECT id FROM lance_feature.leak_topk_bad ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5;"
 	session_send 'SELECT * FROM lance_feature.leak_badpath;'
 	if [ "$SKIP_S3" != yes ]; then
 		session_send 'SELECT * FROM lance_feature.leak_badcreds;'
@@ -156,6 +183,13 @@ session_open "$DB"
 : >"$SESS_DIR/samples"
 GP_SESSION_ID=$(session_value "SELECT coalesce(current_setting('gp_session_id', true), '')" 30 || true)
 
+# The search in every round has to be a search, not the plain scan it falls
+# back to, or the loop would not be measuring the search at all.
+if ! PLAN=$(session_value "EXPLAIN SELECT id FROM lance_feature.leak_topk WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5" 60) ||
+	! printf '%s\n' "$PLAN" | grep -q 'Lance Vector Search: emb <->'; then
+	die "the vector search of the loop is not pushed down: $PLAN"
+fi
+
 # The baseline is taken after one round, not before it: the first failure is
 # what loads lance-c into this backend and starts its threads, and that cost is
 # not a leak.  Everything after it should be flat.
@@ -164,7 +198,7 @@ send_round
 session_mark "$CHUNK_DEADLINE" || die "the warm-up round did not come back within ${CHUNK_DEADLINE}s"
 sample baseline
 
-say "$ROUNDS rounds of $KINDS failing statements, sampling every $SAMPLE_EVERY"
+say "$ROUNDS rounds of $KINDS failing statements and one vector search, sampling every $SAMPLE_EVERY"
 round=0
 while [ "$round" -lt "$ROUNDS" ]; do
 	round=$(( round + 1 ))

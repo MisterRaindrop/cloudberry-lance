@@ -351,8 +351,8 @@ table's row before it counts, since two empty outputs also compare equal.
 
 Two workflows, both on GitHub Actions.
 
-**`ci.yml`** runs on every push to `main` and `develop` and on every pull
-request. Its `static` job checks shell syntax and regenerates the fixtures from
+**`ci.yml`** runs on every push to `main` or to a `ci/**` branch and on every
+pull request. Its `static` job checks shell syntax and regenerates the fixtures from
 scratch with the versions `test/fixtures/requirements.txt` pins, then checks
 them against the committed manifest and expected output - which is how a pylance
 that writes a different file format gets caught. Its `regress` job runs the same

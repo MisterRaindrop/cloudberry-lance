@@ -27,7 +27,7 @@ on:
   push:
     # ci/** too: a branch that changes the workflow has to be able to run it,
     # and workflow_dispatch only offers workflows the default branch has.
-    branches: [main, develop, "ci/**"]
+    branches: [main, "ci/**"]
   pull_request:
   workflow_dispatch:
 

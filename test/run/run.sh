@@ -479,6 +479,10 @@ CREATE FOREIGN TABLE lance_feature.vt (id integer, cat integer, emb real[])
   SERVER vt_files OPTIONS (uri 'vectors.lance');
 CREATE FOREIGN TABLE lance_feature.vt_idx (id integer, cat integer, emb real[])
   SERVER vt_files OPTIONS (uri 'vectors_idx.lance');
+CREATE FOREIGN TABLE lance_feature.vt_seg (id integer, cat integer, emb real[])
+  SERVER vt_files OPTIONS (uri 'vectors_seg.lance');
+CREATE FOREIGN TABLE lance_feature.vt_nulls (id integer, cat integer, emb real[])
+  SERVER vt_files OPTIONS (uri 'vectors_nulls.lance');
 SQL
 trap 'psql -X -q -p "$QD_PORT" -d contrib_regression -c "DROP SERVER vt_files CASCADE" >/dev/null 2>&1 || true' EXIT
 
@@ -511,9 +515,43 @@ check() {
 	echo "vector trace: $label: segment $seg searched, $skipped skipped, opened on [ $opened], index_comparisons $comps"
 }
 
+# check_split LABEL WANT_INDEX SEARCHES EMPTY FRAGMENTS SQL...: a distributed
+# search.  SEARCHES segments searched and EMPTY had no fragments to search; the
+# fragments the searches were given are disjoint and are all FRAGMENTS of the
+# dataset; nobody waited for a target; index_comparisons is > 0 on every
+# searching segment, or 0 on all of them.
+check_split() {
+	local label=$1 want=$2 nsearch=$3 nempty=$4 nfrags=$5 lines search shares ids comps c
+	shift 5
+	lines=$(trace "$@")
+	search=$(printf '%s\n' "$lines" | grep '^lance_fdw: vector search of' || true)
+	[ "$(printf '%s\n' "$search" | grep -c 'vector search of')" = "$nsearch" ] ||
+		fail "$label: expected $nsearch searches, got: $lines"
+	[ "$(printf '%s\n' "$lines" | grep -c 'no fragments to search, skipping' || true)" = "$nempty" ] ||
+		fail "$label: expected $nempty segment(s) with nothing to search, got: $lines"
+	! printf '%s\n' "$lines" | grep -q 'not the search segment' ||
+		fail "$label: a segment waited for a single search: $lines"
+	shares=$(printf '%s\n' "$lines" | grep '^lance_fdw: searching ' |
+		sed -E 's/.*fragment\(s\) \[([0-9 ]*)\].*/\1/')
+	ids=$(printf '%s\n' $shares | sort -n)
+	[ "$(printf '%s\n' $ids | wc -l | tr -d ' ')" = "$nfrags" ] &&
+		[ -z "$(printf '%s\n' $ids | uniq -d)" ] ||
+		fail "$label: the shares [$(echo $shares)] are not $nfrags disjoint fragments"
+	comps=$(printf '%s\n' "$search" | sed -E 's/.*index_comparisons ([0-9]+).*/\1/' | tr '\n' ' ')
+	for c in $comps; do
+		if [ "$want" = index ]; then
+			[ "$c" -gt 0 ] || fail "$label: index_comparisons [ $comps] - a segment did not use the index"
+		else
+			[ "$c" = 0 ] || fail "$label: index_comparisons [ $comps], expected exhaustive searches"
+		fi
+	done
+	echo "vector trace: $label: $nsearch searched [$(printf '%s\n' "$shares" | sed 's/.*/[&]/' | tr '\n' ' ')], $nempty with nothing to search, index_comparisons [ $comps]"
+}
+
 check 'L2 on the index' index \
 	-c "SELECT id FROM lance_feature.vt_idx WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
-check 'no index' noindex \
+check 'no index, single' noindex \
+	-c 'SET lance_fdw.vector_search_mode = single' \
 	-c "SELECT id FROM lance_feature.vt WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
 check 'cosine on an L2 index' noindex \
 	-c "SELECT id FROM lance_feature.vt_idx WHERE cat = 2 ORDER BY emb <=> '{1,2,3,4,5,6,7,8}' LIMIT 5"
@@ -521,6 +559,12 @@ check 'nprobes set with SET LOCAL' index \
 	-c 'BEGIN' -c 'SET LOCAL lance_fdw.nprobes = 2' \
 	-c "SELECT id FROM lance_feature.vt_idx ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5" \
 	-c 'COMMIT'
+check_split 'distributed, no index' noindex "$nseg" 0 4 \
+	-c "SELECT id FROM lance_feature.vt WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
+check_split 'distributed, three index segments' index "$nseg" 0 4 \
+	-c "SELECT id FROM lance_feature.vt_seg WHERE cat = 2 ORDER BY emb <-> '{1,2,3,4,5,6,7,8}' LIMIT 5"
+check_split 'distributed, two fragments' noindex 2 $((nseg - 2)) 2 \
+	-c "SELECT id FROM lance_feature.vt_nulls ORDER BY emb <-> '{1,0,0,0}' LIMIT 3"
 BODY
 )
 	remote "$body"

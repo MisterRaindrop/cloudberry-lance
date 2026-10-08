@@ -28,11 +28,26 @@
 # reading the signal masks of that backend's threads, which is the observable
 # half of I5.
 #
+# With --scan topk the statement is a vector Top-K search instead, on a table
+# set to mpp_execute 'coordinator' so that the search runs in the session's own
+# backend.  A search is one long lance-c computation with no batch boundary in
+# it; what is under test there is that the wrapper waits for it in a way an
+# interrupt can break (PROBE-IMPL P-2).  Measured on the coordinator, because
+# with all segments Cloudberry's own cancel round trip - about 380 ms on the
+# three-segment demo cluster, for a pg_sleep() just as for a search - is most
+# of what the client sees.
+#
 # Usage:
 #   test/stability/cancel_loop.sh [options]
 #
 #   --rounds N                rounds to run                  (default 50)
 #   --dataset NAME            fixture in the bucket to scan   (default big)
+#   --scan full|topk          read every column of every row, or run a vector
+#                             Top-K search on its emb column  (default full)
+#   --max-median-latency-pct N
+#                             fail when the median interrupt latency is more
+#                             than N% of the fastest uninterrupted scan; needs
+#                             --delay-ms auto                 (default 0, off)
 #   --mode M                  timeout | cancel | both         (default both)
 #   --delay-ms N|auto         how long a scan runs before the interrupt
 #                                                             (default auto)
@@ -57,6 +72,9 @@
 #   make -C test/fixtures gen GEN_FLAGS=--with-big
 #   make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
 # For a dry run that only exercises this script, use --dataset large_text.
+# The topk scan wants vectors_big (1M random 64-d vectors, no index), which the
+# same --with-big generates; upload it with --datasets vectors_big.  For a dry
+# run, --dataset vectors works.
 #
 set -euo pipefail
 
@@ -66,6 +84,8 @@ TAG=cancel_loop
 
 ROUNDS=50
 DATASET=big
+SCAN=full
+MAX_MEDIAN_PCT=0
 MODE=both
 DELAY_SPEC=auto
 DEADLINE=60
@@ -83,6 +103,10 @@ while [ $# -gt 0 ]; do
 		--rounds=*) ROUNDS=${1#*=} ;;
 		--dataset) need_arg "$1" $#; DATASET=$2; shift ;;
 		--dataset=*) DATASET=${1#*=} ;;
+		--scan) need_arg "$1" $#; SCAN=$2; shift ;;
+		--scan=*) SCAN=${1#*=} ;;
+		--max-median-latency-pct) need_arg "$1" $#; MAX_MEDIAN_PCT=$2; shift ;;
+		--max-median-latency-pct=*) MAX_MEDIAN_PCT=${1#*=} ;;
 		--mode) need_arg "$1" $#; MODE=$2; shift ;;
 		--mode=*) MODE=${1#*=} ;;
 		--delay-ms) need_arg "$1" $#; DELAY_SPEC=$2; shift ;;
@@ -108,13 +132,20 @@ case "$MODE" in
 	timeout|cancel|both) ;;
 	*) die "--mode must be timeout, cancel or both" ;;
 esac
+case "$SCAN" in
+	full|topk) ;;
+	*) die "--scan must be full or topk" ;;
+esac
 case "$DELAY_SPEC" in
 	auto|[0-9]*) ;;
 	*) die "--delay-ms must be a number of milliseconds or 'auto'" ;;
 esac
-case "$ROUNDS$DEADLINE$CAL_DEADLINE$MIN_PCT$MIN_THREADS" in
-	*[!0-9]*) die "--rounds, --deadline, --calibration-deadline, --min-interrupted-pct and --min-threads take numbers" ;;
+case "$ROUNDS$DEADLINE$CAL_DEADLINE$MIN_PCT$MIN_THREADS$MAX_MEDIAN_PCT" in
+	*[!0-9]*) die "--rounds, --deadline, --calibration-deadline, --min-interrupted-pct, --min-threads and --max-median-latency-pct take numbers" ;;
 esac
+if [ "$MAX_MEDIAN_PCT" -gt 0 ] && [ "$DELAY_SPEC" != auto ]; then
+	die "--max-median-latency-pct compares against the calibration, so it needs --delay-ms auto"
+fi
 [ "$ROUNDS" -ge 1 ] || die "--rounds must be at least 1"
 
 require_docker
@@ -127,10 +158,12 @@ if [ ! -d "$ROOT/test/fixtures/data/$DATASET.lance" ]; then
 	say "note: $ROOT/test/fixtures/data/$DATASET.lance is not on this host, so it may never have been uploaded"
 fi
 
-say "container=$CONTAINER rounds=$ROUNDS dataset=$DATASET mode=$MODE db=$DB"
+say "container=$CONTAINER rounds=$ROUNDS dataset=$DATASET scan=$SCAN mode=$MODE db=$DB"
 stability_remote "$STABILITY_DIR/cancel_loop.remote.sh" \
 	"ROUNDS=$ROUNDS" \
 	"DATASET=$DATASET" \
+	"SCAN=$SCAN" \
+	"MAX_MEDIAN_PCT=$MAX_MEDIAN_PCT" \
 	"MODE=$MODE" \
 	"DELAY_SPEC=$DELAY_SPEC" \
 	"DEADLINE=$DEADLINE" \

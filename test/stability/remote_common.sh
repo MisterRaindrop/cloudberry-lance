@@ -257,14 +257,16 @@ session_open() {
 
 session_send() { printf '%s\n' "$1" >&3; }
 
-# Waits for a file to have something in it, or for psql to have died.
+# Waits for a file to have something in it, or for psql to have died.  The
+# step is also the resolution of every latency cancel_loop reports: at 50 ms a
+# search cancelled in 6-20 ms (by the coordinator's log) read as 55-60.
 session_wait() {
 	local file=$1 deadline
 	deadline=$(( $(now_ms) + ${2:-60} * 1000 ))
 	while [ ! -s "$file" ]; do
 		[ "$(now_ms)" -lt "$deadline" ] || return 1
 		kill -0 "$SESS_PSQL" 2>/dev/null || return 1
-		sleep 0.05
+		sleep 0.01
 	done
 	return 0
 }

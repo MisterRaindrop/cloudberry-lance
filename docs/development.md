@@ -178,8 +178,8 @@ cp310+). `run.sh` generates them if `test/fixtures/data` is missing, uploads
 them to MinIO, and streams them into the container. The `big` fixture is opt-in:
 
 ```sh
-make -C test/fixtures gen GEN_FLAGS=--with-big          # ~1.5 GB, not deterministic
-make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
+make -C test/fixtures gen GEN_FLAGS=--with-big          # big + vectors_big, ~1.75 GB, not deterministic
+make -C test/fixtures upload UPLOAD_FLAGS="--datasets big,vectors_big"
 ```
 
 ### The S3 service, and how the container reaches it
@@ -271,6 +271,24 @@ sample that lands on that tail halves to roughly a whole settled scan. Add the
 interrupt's own latency, up to 164 ms, and 36 of 50 rounds finished first. The
 fastest of several samples is the one that bounds how early a round can end.
 
+`--scan topk --dataset vectors_big` runs the same loop over a vector search:
+`ORDER BY emb <-> <constant> LIMIT 10` on a million random 64-d vectors with no
+index, so every search reads them all. The table is set to `mpp_execute
+'coordinator'` for the rounds, which puts the search in the session's own
+backend: with all segments the client mostly measures Cloudberry's cancel round
+trip to the segments, about 380 ms on the demo cluster for a `pg_sleep()` just
+as for a search. The script checks the plan is a vector search before the first
+round. `--max-median-latency-pct 25` then fails the run when the median
+interrupt latency is over a quarter of the fastest uninterrupted search: waiting
+the search out instead lands near half of it, because that is where the rounds
+are interrupted. Measured locally, the wrapper before the search was polled
+failed it at a median of 51 ms against a 101 ms search; polled, it passed at
+16 ms against 122 ms.
+
+The latencies are only as fine as `session_wait`'s 10 ms step. At the 50 ms it
+used to be, a search the coordinator's log showed cancelled 6-20 ms after the
+signal read as 55-60 ms.
+
 What it asserts, and what to record:
 
 - every round comes back inside `--deadline` (60 s) with a cancellation error.
@@ -360,7 +378,8 @@ that writes a different file format gets caught. Its `regress` job runs the same
 `ci/Dockerfile`, with `LANCE_TEST_CARGO=direct`.
 
 **`stability.yml`** runs the three stability scripts in full - a thousand
-leak_loop rounds, fifty cancel_loop rounds over the 1.5 GB `big` fixture -
+leak_loop rounds, fifty cancel_loop rounds over the 1.5 GB `big` fixture and
+fifty over vector searches of `vectors_big` -
 weekly and on demand (Actions → Stability → Run workflow). They take the better
 part of an hour, which is why a push only dry-runs them.
 

@@ -488,6 +488,18 @@ def test_generator_can_build_the_big_dataset(tmp_path):
     assert len(set(ds.to_table().column("payload").to_pylist())) == 12
 
 
+def test_generator_can_build_the_vectors_big_dataset(tmp_path):
+    """'vectors_big' rides on --with-big; exercise it at a few rows."""
+    m = gen.generate(str(tmp_path), names=["vectors_big"], with_big=True,
+                     vectors_big_rows=12)
+    e = m["datasets"]["vectors_big"]
+    assert (e["rows"], e["fragments"]) == (12, 4)
+    assert e["expected"] is None and e["expected_rows"] is None
+    ds = lance.dataset(os.path.join(str(tmp_path), "data", "vectors_big.lance"))
+    assert ds.schema.field("emb").type == pa.list_(pa.float32(), 64)
+    assert ds.list_indices() == []
+
+
 def test_generator_regenerates_a_subset_without_disturbing_the_others(tmp_path):
     root = str(tmp_path)
     path = os.path.join(root, "manifest.json")

@@ -17,14 +17,26 @@
 #
 # test/stability/cancel_loop.remote.sh - the container half; see cancel_loop.sh.
 #
-# Streamed in behind remote_common.sh, with ROUNDS, DATASET, MODE, DELAY_SPEC,
-# DEADLINE, CAL_DEADLINE, MIN_PCT, MIN_THREADS, DB and KEEP_DB set by the
-# prelude.  Nothing here reads stdin: stdin is this script.
+# Streamed in behind remote_common.sh, with ROUNDS, DATASET, SCAN,
+# MAX_MEDIAN_PCT, MODE, DELAY_SPEC, DEADLINE, CAL_DEADLINE, MIN_PCT,
+# MIN_THREADS, DB and KEEP_DB set by the prelude.  Nothing here reads stdin:
+# stdin is this script.
 
 TABLE="$DATASET.lance"
-# A whole-row reference is what makes the wrapper read every column (D6), so
-# this is a scan of the whole dataset whatever its schema turns out to be.
-SCAN_SQL="SELECT sum(pg_column_size(t)) FROM lance_feature.stability_scan t;"
+if [ "$SCAN" = topk ]; then
+	# SCAN_SQL is written by setup(), once it knows how wide the vectors are.
+	# The table's mpp_execute while the rounds run, and the other one that
+	# the count after the loop is compared against.
+	LOOP_EXEC=coordinator
+	OTHER_EXEC="all segments"
+else
+	# A whole-row reference is what makes the wrapper read every column (D6),
+	# so this is a scan of the whole dataset whatever its schema turns out to
+	# be.
+	SCAN_SQL="SELECT sum(pg_column_size(t)) FROM lance_feature.stability_scan t;"
+	LOOP_EXEC="all segments"
+	OTHER_EXEC=coordinator
+fi
 
 MIN_DELAY_MS=50
 CAL_SAMPLES=3
@@ -37,6 +49,7 @@ INTERRUPTED=0
 COMPLETED=0
 ROUNDS_RUN=0
 CAL_NOTE=
+FASTEST=
 
 teardown() {
 	psql_run "$DB" <<SQL || true
@@ -106,6 +119,31 @@ SQL
 	psql_run "$DB" <<SQL
 ALTER FOREIGN TABLE lance_feature."$TABLE" RENAME TO stability_scan;
 SQL
+
+	[ "$SCAN" = topk ] || return 0
+
+	local dim plan
+	psql_run "$DB" <<SQL
+ALTER FOREIGN TABLE lance_feature.stability_scan OPTIONS (ADD mpp_execute '$LOOP_EXEC');
+SQL
+	dim=$(psql_val "$DB" <<SQL
+SELECT array_length(emb, 1) FROM lance_feature.stability_scan WHERE emb IS NOT NULL LIMIT 1;
+SQL
+	)
+	case "$dim" in
+		''|*[!0-9]*) die "could not read the width of $TABLE's emb column (got '$dim')" ;;
+	esac
+
+	# array_fill() is immutable, so the planner folds it into the constant a
+	# search needs.  A rounds-long loop of plain scans would pass every check
+	# below, so the plan is checked before the first round.
+	SCAN_SQL="SELECT id FROM lance_feature.stability_scan ORDER BY emb <-> array_fill(0.5::real, ARRAY[$dim]) LIMIT 10;"
+	plan=$(psql_val "$DB" <<<"EXPLAIN $SCAN_SQL")
+	if ! grep -q 'Lance Vector Search: emb' <<<"$plan"; then
+		printf '%s\n' "$plan"
+		die "the statement is not a vector search, so there is nothing to test"
+	fi
+	say "a ${dim}-d vector search, run on the coordinator: $SCAN_SQL"
 }
 
 # Which of the two interrupts a message is about, or none if the statement got
@@ -181,6 +219,7 @@ calibrate() {
 		fi
 	done
 
+	FASTEST=$fastest
 	DELAY_MS=$(( fastest / 2 ))
 	if [ "$DELAY_MS" -lt "$MIN_DELAY_MS" ]; then
 		DELAY_MS=$MIN_DELAY_MS
@@ -283,17 +322,22 @@ done
 ROWS=
 ROWS_QD=
 if ROWS=$(session_value 'SELECT count(*) FROM lance_feature.stability_scan' "$CAL_DEADLINE"); then
-	say "after the loop, the same session counted $ROWS rows across the segments"
+	say "after the loop, the same session counted $ROWS rows with mpp_execute '$LOOP_EXEC'"
 else
 	say "the session did not answer a plain count(*) after the loop"
 	FAILURES=$(( FAILURES + 1 ))
 fi
 
+if [ "$SCAN" = topk ]; then
+	EXEC_OPT="SET mpp_execute '$OTHER_EXEC'"
+else
+	EXEC_OPT="ADD mpp_execute '$OTHER_EXEC'"
+fi
 psql_run "$DB" <<SQL
-ALTER FOREIGN TABLE lance_feature.stability_scan OPTIONS (ADD mpp_execute 'coordinator');
+ALTER FOREIGN TABLE lance_feature.stability_scan OPTIONS ($EXEC_OPT);
 SQL
 if ROWS_QD=$(session_value 'SELECT count(*) FROM lance_feature.stability_scan' "$CAL_DEADLINE"); then
-	say "the same session read it on the coordinator alone: $ROWS_QD rows"
+	say "the same session read it with mpp_execute '$OTHER_EXEC': $ROWS_QD rows"
 	if [ -n "$ROWS" ] && [ "$ROWS" != "$ROWS_QD" ]; then
 		say "the two mpp_execute modes disagree: $ROWS vs $ROWS_QD (I11)"
 		FAILURES=$(( FAILURES + 1 ))
@@ -342,6 +386,29 @@ say "rounds run $ROUNDS_RUN of $ROUNDS: interrupted $INTERRUPTED, finished first
 say "interrupt to error, in ms: $(distribution <"$SESS_DIR/lat")"
 say "  statement_timeout, overshoot: $(distribution <"$SESS_DIR/lat.timeout")"
 say "  pg_cancel_backend, latency:   $(distribution <"$SESS_DIR/lat.cancel")"
+
+# An interrupt that only lands when the work is done would still pass every
+# check above, as long as the delay leaves the round unfinished; this is the
+# check that it lands sooner.  Waiting the work out puts the median near half
+# the fastest scan, which is where the rounds are interrupted.
+if [ "$MAX_MEDIAN_PCT" -gt 0 ]; then
+	MEDIAN=$(sort -n "$SESS_DIR/lat" | awk '{ a[NR] = $1 } END { if (NR) print a[int((NR + 1) / 2)] }')
+	if [ -z "$FASTEST" ]; then
+		say "no calibration to compare the latency against: $CAL_NOTE"
+		FAILURES=$(( FAILURES + 1 ))
+	elif [ -z "$MEDIAN" ]; then
+		say "no round was interrupted, so there is no latency to check"
+		FAILURES=$(( FAILURES + 1 ))
+	else
+		LIMIT_MS=$(( FASTEST * MAX_MEDIAN_PCT / 100 ))
+		if [ "$MEDIAN" -gt "$LIMIT_MS" ]; then
+			say "median interrupt latency ${MEDIAN} ms is over ${MAX_MEDIAN_PCT}% of the fastest uninterrupted scan (${FASTEST} ms): ${LIMIT_MS} ms"
+			FAILURES=$(( FAILURES + 1 ))
+		else
+			say "median interrupt latency ${MEDIAN} ms, within ${MAX_MEDIAN_PCT}% of the fastest uninterrupted scan (${FASTEST} ms): ${LIMIT_MS} ms"
+		fi
+	fi
+fi
 
 if [ "$FAILURES" != 0 ]; then
 	say "FAIL ($FAILURES problems)"

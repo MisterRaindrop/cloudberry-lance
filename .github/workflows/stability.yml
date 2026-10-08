@@ -84,14 +84,14 @@ jobs:
       - name: Build, install and run the suites
         run: bash test/run/run.sh
 
-      # cancel_loop scans the big fixture from the S3 service.  It is generated and
-      # uploaded after run.sh, and removed from the host afterwards, so that
-      # nothing streams 1.5 GB into the container it never reads from there.
-      - name: Generate and upload the big fixture
+      # cancel_loop scans the big fixtures from the S3 service.  They are generated
+      # and uploaded after run.sh, and removed from the host afterwards, so that
+      # nothing streams 1.75 GB into the container it never reads from there.
+      - name: Generate and upload the big fixtures
         run: |
           make -C test/fixtures gen GEN_FLAGS=--with-big
-          make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
-          rm -rf test/fixtures/data/big.lance
+          make -C test/fixtures upload UPLOAD_FLAGS="--datasets big,vectors_big"
+          rm -rf test/fixtures/data/big.lance test/fixtures/data/vectors_big.lance
 
       - name: noregress
         run: bash test/stability/noregress.sh
@@ -101,3 +101,8 @@ jobs:
 
       - name: cancel_loop
         run: bash test/stability/cancel_loop.sh --rounds 50 --dataset big
+
+      - name: cancel_loop, vector search
+        run: >-
+          bash test/stability/cancel_loop.sh --rounds 50 --scan topk
+          --dataset vectors_big --max-median-latency-pct 25

@@ -41,7 +41,10 @@
  */
 #include "postgres.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <unistd.h>
 
 #include "lance_fdw.h"
 #include "lance_arrow.h"
@@ -57,9 +60,11 @@
 #include "executor/executor.h"
 #include "foreign/foreign.h"
 #include "miscadmin.h"
+#include "storage/latch.h"
 #include "utils/array.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/wait_event.h"
 
 typedef struct LanceScanState
 {
@@ -133,6 +138,14 @@ typedef struct LanceScanState
 		uint64		index_comparisons;
 	}			stats;
 
+	/*
+	 * A search is read with lance_scanner_poll_next rather than through an
+	 * Arrow stream, so that a cancel does not wait for the whole search
+	 * (PROBE-IMPL P-2).  Its schema only arrives with the first batch, which
+	 * is when the converters are built, against this descriptor.
+	 */
+	TupleDesc	tupdesc;
+
 	MemoryContext scan_cxt;		/* everything above lives here */
 	MemoryContext batch_cxt;	/* values of the current batch, reset per batch */
 } LanceScanState;
@@ -144,6 +157,75 @@ static inline int
 lance_scan_stream_columns(const LanceScanState *state)
 {
 	return state->ncolumns + (state->searching ? 1 : 0);
+}
+
+/*
+ * The pipe a search's waker writes to.  lance-c calls the waker on one of its
+ * own threads when lance_scanner_poll_next has more to give, and the backend
+ * sleeps on the read end next to its latch, so it wakes for either.
+ *
+ * One pipe per backend, made on the first search and never closed.  A waker
+ * may run until lance_scanner_close() returns, and that close can come from
+ * the resource owner callback on an error path, in any order relative to
+ * other cleanup: a per-scan pipe closed first would leave a waker writing to a
+ * descriptor number the backend may already have reused.  Both ends are
+ * non-blocking, so the waker never blocks and a full pipe only means a wake is
+ * already pending.
+ */
+static int	lance_waker_fds[2] = {-1, -1};
+
+static void
+lance_scan_waker(void *ctx)
+{
+	char		c = 0;
+
+	/* On a lance thread: no palloc, no elog, nothing but the write. */
+	(void) ctx;
+	(void) !write(lance_waker_fds[1], &c, 1);
+}
+
+static void
+lance_scan_open_waker(void)
+{
+	int			fds[2];
+	int			i;
+
+	if (lance_waker_fds[0] >= 0)
+		return;
+
+	if (pipe(fds) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("lance_fdw: could not create the vector search wakeup pipe: %m")));
+
+	for (i = 0; i < 2; i++)
+	{
+		if (fcntl(fds[i], F_SETFL, O_NONBLOCK) != 0 ||
+			fcntl(fds[i], F_SETFD, FD_CLOEXEC) != 0)
+		{
+			int			save_errno = errno;
+
+			close(fds[0]);
+			close(fds[1]);
+			errno = save_errno;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("lance_fdw: could not set up the vector search wakeup pipe: %m")));
+		}
+	}
+
+	lance_waker_fds[0] = fds[0];
+	lance_waker_fds[1] = fds[1];
+}
+
+/* Throw away wakes that are already accounted for, before the next poll. */
+static void
+lance_scan_drain_waker(void)
+{
+	char		buf[64];
+
+	while (read(lance_waker_fds[0], buf, sizeof(buf)) > 0)
+		;
 }
 
 /*
@@ -535,11 +617,19 @@ lance_scan_open_stream(LanceScanState *state)
 {
 	int32		rc;
 
+	state->stream_done = false;
+
+	/* A search is polled straight off the scanner (lance_scan_poll_batch). */
+	if (state->searching)
+	{
+		lance_scan_open_waker();
+		return;
+	}
+
 	state->stream = lance_rt_track_new_stream(&state->stream_handle);
 	LANCE_MASKED(rc = lance_scanner_to_arrow_stream(state->scanner,
 													state->stream));
 	LANCE_CHECK(rc == 0, state->uri);
-	state->stream_done = false;
 }
 
 /*
@@ -549,16 +639,10 @@ lance_scan_open_stream(LanceScanState *state)
  * (PROBES Q2).
  */
 static void
-lance_scan_build_converters(LanceScanState *state, Relation rel)
+lance_scan_resolve_converters(LanceScanState *state)
 {
-	TupleDesc	tupdesc = RelationGetDescr(rel);
+	TupleDesc	tupdesc = state->tupdesc;
 	int			i;
-	int			rc;
-
-	memset(&state->schema, 0, sizeof(state->schema));
-	LANCE_MASKED(rc = state->stream->get_schema(state->stream, &state->schema));
-	if (rc != 0)
-		lance_scan_stream_error(state);
 
 	if (state->schema.n_children != (int64) lance_scan_stream_columns(state))
 		ereport(ERROR,
@@ -595,6 +679,25 @@ lance_scan_build_converters(LanceScanState *state, Relation rel)
 									  att->atttypid, att->atttypmod,
 									  &state->converters[i]);
 	}
+}
+
+static void
+lance_scan_build_converters(LanceScanState *state, Relation rel)
+{
+	int			rc;
+
+	state->tupdesc = RelationGetDescr(rel);
+
+	/* A search's schema comes with its first batch (lance_scan_poll_batch). */
+	if (state->searching)
+		return;
+
+	memset(&state->schema, 0, sizeof(state->schema));
+	LANCE_MASKED(rc = state->stream->get_schema(state->stream, &state->schema));
+	if (rc != 0)
+		lance_scan_stream_error(state);
+
+	lance_scan_resolve_converters(state);
 }
 
 /*
@@ -1196,6 +1299,93 @@ lance_scan_release_batch(LanceScanState *state)
 }
 
 /*
+ * One lance_scanner_poll_next, and on a batch its export into state->batch.
+ * Called masked, so nothing here may ereport: the result goes back through
+ * *status and the return value.  The first batch's schema is kept for the
+ * converters; later ones describe the same columns and are let go.
+ */
+static int32
+lance_scan_poll_once(LanceScanState *state, LancePollStatus *status)
+{
+	LanceBatch *lbatch = NULL;
+	struct ArrowSchema schema;
+	int32		rc;
+
+	*status = lance_scanner_poll_next(state->scanner, lance_scan_waker, NULL,
+									  &lbatch);
+	if (*status != LANCE_POLL_READY)
+		return 0;
+
+	memset(&schema, 0, sizeof(schema));
+	rc = lance_batch_to_arrow(lbatch, &state->batch, &schema);
+	/* The export holds its own references; freeing keeps the error intact. */
+	lance_batch_free(lbatch);
+	if (rc != 0)
+		return rc;
+
+	if (state->schema.release == NULL)
+		state->schema = schema;
+	else if (schema.release != NULL)
+		schema.release(&schema);
+	return 0;
+}
+
+/*
+ * Wait for the search's next batch, or its end, without leaving the backend
+ * deaf to a cancel for the length of the search (PROBE-IMPL P-2).  A poll
+ * that is not ready returns at once and lance-c goes on computing on its own
+ * threads; the backend sleeps on its latch and the waker pipe, and acts on any
+ * interrupt each time it wakes.  An ERROR from there closes the scanner
+ * through the resource owner, and closing is what stops the search.
+ *
+ * Leaves state->batch released at the end of the search.
+ */
+static void
+lance_scan_poll_batch(LanceScanState *state)
+{
+	for (;;)
+	{
+		LancePollStatus status;
+		int32		rc;
+
+		lance_scan_drain_waker();
+		LANCE_MASKED(rc = lance_scan_poll_once(state, &status));
+		LANCE_CHECK(rc == 0, state->uri);
+
+		switch (status)
+		{
+			case LANCE_POLL_READY:
+				if (state->converters == NULL)
+					lance_scan_resolve_converters(state);
+				return;
+
+			case LANCE_POLL_FINISHED:
+				return;
+
+			case LANCE_POLL_ERROR:
+				/* Rebuilt by a ReScan, as after a failed stream (D16). */
+				state->stream_failed = true;
+				lance_rt_error(state->uri);
+
+			case LANCE_POLL_PENDING:
+
+				/*
+				 * The waker fires at most once per pending poll.  The timeout
+				 * is only a safety net: polling again early costs nothing.
+				 */
+				(void) WaitLatchOrSocket(MyLatch,
+										 WL_LATCH_SET | WL_SOCKET_READABLE |
+										 WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+										 lance_waker_fds[0], 1000L,
+										 PG_WAIT_EXTENSION);
+				ResetLatch(MyLatch);
+				CHECK_FOR_INTERRUPTS();
+				break;
+		}
+	}
+}
+
+/*
  * Pull the next batch.  Returns false at end of stream; a zero-length batch is
  * possible and is not the end, so the caller loops.
  */
@@ -1213,24 +1403,30 @@ lance_scan_next_batch(LanceScanState *state)
 	if (state->stream_done)
 		return false;
 
-	LANCE_MASKED(rc = state->stream->get_next(state->stream, &state->batch));
-
-	/*
-	 * Signals were blocked for the whole read, so anything that arrived during
-	 * it was delivered on the restore just now and is acted on here rather
-	 * than one batch later (A5).  The batch, if there is one, is freed by the
-	 * scan context's reset callback on the way out.
-	 */
-	CHECK_FOR_INTERRUPTS();
-
-	if (rc != 0)
+	if (state->searching)
+		lance_scan_poll_batch(state);
+	else
 	{
+		LANCE_MASKED(rc = state->stream->get_next(state->stream, &state->batch));
+
 		/*
-		 * lance-c poisons the scanner behind a stream that failed, so remember
-		 * it: a ReScan after this has to build a new one (DESIGN D16).
+		 * Signals were blocked for the whole read, so anything that arrived
+		 * during it was delivered on the restore just now and is acted on here
+		 * rather than one batch later (A5).  The batch, if there is one, is
+		 * freed by the scan context's reset callback on the way out.
 		 */
-		state->stream_failed = true;
-		lance_scan_stream_error(state);
+		CHECK_FOR_INTERRUPTS();
+
+		if (rc != 0)
+		{
+			/*
+			 * lance-c poisons the scanner behind a stream that failed, so
+			 * remember it: a ReScan after this has to build a new one (DESIGN
+			 * D16).
+			 */
+			state->stream_failed = true;
+			lance_scan_stream_error(state);
+		}
 	}
 
 	if (state->batch.release == NULL)
@@ -1332,8 +1528,11 @@ lance_scan_next(ForeignScanState *node)
 	 */
 	ExecClearTuple(slot);
 
-	/* The QD, and a QE with an empty share, have nothing open and no rows. */
-	if (state == NULL || state->stream == NULL)
+	/*
+	 * The QD, and a QE with an empty share or not chosen to search, have
+	 * nothing open and no rows.  A search has a scanner but no stream.
+	 */
+	if (state == NULL || state->scanner == NULL)
 		return slot;
 
 	while (state->batch_row >= state->batch_len)
@@ -1362,11 +1561,13 @@ lance_scan_rescan(ForeignScanState *node)
 	state->stream = NULL;
 	state->stream_done = false;
 
-	if (state->stream_failed)
+	if (state->stream_failed || state->searching)
 	{
 		/*
 		 * The scanner behind a failed stream is poisoned, so rewinding means
 		 * building a new one from the same dataset (DESIGN D16, PROBES Q13).
+		 * A search is polled off the scanner itself, which does not start
+		 * over either.
 		 */
 		lance_rt_release(state->sc_handle);
 		state->sc_handle = NULL;

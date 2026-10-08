@@ -641,29 +641,34 @@ the container, the same bridge `run.sh` uses.
 
 | Script | What it asserts |
 |---|---|
-| `cancel_loop.sh` | An S3 scan interrupted round after round, half by `statement_timeout` and half by `pg_cancel_backend()`, comes back every time inside a deadline; the session then still works, both `mpp_execute` modes agree on the row count, every thread of that backend blocks the signals a backend is driven by, nothing dumped core and the cluster is whole. Prints the interrupt-to-error distribution. |
+| `cancel_loop.sh` | An S3 scan interrupted round after round, half by `statement_timeout` and half by `pg_cancel_backend()`, comes back every time inside a deadline; the session then still works, both `mpp_execute` modes agree on the row count, every thread of that backend blocks the signals a backend is driven by, nothing dumped core and the cluster is whole. Prints the interrupt-to-error distribution. With `--scan topk` the statement is a vector search run on the coordinator, and `--max-median-latency-pct` fails a run whose interrupts wait the search out. |
 | `leak_loop.sh` | A thousand rounds of three failing scans in one session leave the backend's descriptor count and resident memory where they started. Prints the whole curve, plus thread and QE-process counts as observations. |
 | `noregress.sh` | A fixed SQL script with no Lance in it — distributed tables, a cross-segment join, an external web table through `gp_exttable_fdw`, an `EXPLAIN` — produces byte-identical output with the extension absent, installed, and installed after a scan. |
 
 ```sh
 bash test/stability/cancel_loop.sh --rounds 50 --dataset big
+bash test/stability/cancel_loop.sh --rounds 50 --scan topk --dataset vectors_big \
+    --max-median-latency-pct 25
 bash test/stability/leak_loop.sh --rounds 1000
 bash test/stability/noregress.sh
 bash test/run/run.sh --stability       # after the suites, dry-run all three
 ```
 
 `--help` on any of them lists its options. The `big` fixture the cancellation
-loop wants by default is about 1.5 GB and is not generated unless asked for:
+loop wants by default is about 1.5 GB, and `vectors_big` (a million random
+64-d vectors, 250 MB) is what its `--scan topk` run reads; neither is generated
+unless asked for:
 
 ```sh
 make -C test/fixtures gen GEN_FLAGS=--with-big
-make -C test/fixtures upload UPLOAD_FLAGS="--datasets big"
+make -C test/fixtures upload UPLOAD_FLAGS="--datasets big,vectors_big"
 ```
 
 `--dataset large_text` runs the same loop against a 1 MiB dataset instead, which
 exercises the script rather than the wrapper: a scan that small can finish
 before the interrupt reaches it. `run.sh --stability` uses exactly that, with two
-rounds, twenty leak rounds and one `noregress` pass, so that a run catches a
+rounds, plus two `--scan topk` rounds on the 960-row `vectors` fixture, twenty
+leak rounds and one `noregress` pass, so that a run catches a
 stability script that has stopped working without pretending to have proved the
 invariant. `docs/development.md` has the rest, including what the numbers mean.
 
@@ -729,9 +734,14 @@ invariant. `docs/development.md` has the rest, including what the numbers mean.
   constants, so it is usually unaffected; `force_generic_plan` is not.
 - One segment searches the whole dataset, so a vector search does not scale
   with the cluster.
-- A search is one call into lance-c with signals blocked, so cancelling it
-  takes effect when the search returns. How long that can be on a large
-  dataset without an index has not been measured.
+- A cancel or `statement_timeout` reaches a search while it runs: the wrapper
+  polls lance-c and sleeps on its latch in between, and closing the scanner
+  stops the search. On a million 64-d vectors read from S3 it took a median of
+  16 ms; one poll can still hold it for some milliseconds, more on a larger
+  dataset (up to 50 ms measured on four million). With `mpp_execute 'all
+  segments'` the client waits longer, because Cloudberry's own cancel round
+  trip to the segments comes first: about 380 ms on the three-segment demo
+  cluster, the same for a `pg_sleep()` on the segments as for a search.
 - What happens when the query's distance differs from the one an index was
   trained with — Lance searches exhaustively and the result is exact — was
   measured on the pinned lance-c and has to be measured again when it moves.

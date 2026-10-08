@@ -551,6 +551,10 @@ run_stability() {
 	env "${common[@]}" bash "$ROOT/test/stability/cancel_loop.sh" \
 		--rounds 2 --dataset large_text --min-interrupted-pct 0
 
+	say "dry-running test/stability/cancel_loop.sh --scan topk"
+	env "${common[@]}" bash "$ROOT/test/stability/cancel_loop.sh" \
+		--rounds 2 --scan topk --dataset vectors --min-interrupted-pct 0
+
 	say "dry-running test/stability/leak_loop.sh"
 	env "${common[@]}" bash "$ROOT/test/stability/leak_loop.sh" --rounds 20
 

@@ -721,12 +721,15 @@ invariant. `docs/development.md` has the rest, including what the numbers mean.
   reproducible), and `refine_factor = 5` brought it to 1.0; on data without
   cluster structure it measured far lower. What a good
   `refine_factor` is for real embeddings has not been measured.
-- `lance_fdw.nprobes` only raises the number of partitions searched. With the
-  maximum left to Lance, the pinned lance-c searched every partition of the
-  test fixture's 12-partition index whatever the minimum was — so there is no
-  setting yet that trades recall for speed.
-  Pinning the maximum as well would make a filtered search return fewer than
-  `k` rows, which is why it is not done.
+- `lance_fdw.nprobes` only raises the number of partitions searched; there is
+  no setting for an upper bound, on purpose. On a 256-partition index Lance's
+  default already probed a single partition, so a cap could not make a search
+  cheaper, and capping the extra probing Lance does for a filtered search made
+  one return fewer than `k` rows (none at all, for a filter matching one row).
+  Probing more partitions did not raise recall there either - the index's
+  quantisation error was the limit, which is what `refine_factor` addresses.
+  (The 12-partition test fixture is probed in full whatever the settings, which
+  says more about its size than about Lance.)
 - A vector search is not used for a query whose `WHERE` clause holds a
   parameter: such a qualifier is not pushed down (see below), and a qualifier
   evaluated here would run after the search. A prepared statement under the

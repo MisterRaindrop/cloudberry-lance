@@ -65,11 +65,10 @@ setup() {
 	ensure_db "$DB"
 	DID_SETUP=yes
 
-	# 0.1 gained the vector operators without a new version, so a database
-	# that installed the extension before them still has it without them, and
-	# CREATE EXTENSION IF NOT EXISTS below would not add them.  Dropping the
-	# extension here would take whatever else depends on it in a database this
-	# script may not own, so say so instead.
+	# A database that installed 0.1 has the extension without the vector
+	# operators, and CREATE EXTENSION IF NOT EXISTS below would not add them.
+	# Updating it here would change a database this script may not own, so
+	# say so instead.
 	STALE=$(psql_val "$DB" <<'SQL'
 SELECT count(*) FROM pg_extension e
  WHERE e.extname = 'lance_fdw'
@@ -79,7 +78,7 @@ SELECT count(*) FROM pg_extension e
 SQL
 	)
 	[ "$STALE" = 0 ] ||
-		die "lance_fdw in database $DB predates the vector operators; run DROP EXTENSION lance_fdw CASCADE there, or pass --db with a new database"
+		die "lance_fdw in database $DB predates the vector operators; run ALTER EXTENSION lance_fdw UPDATE there, or pass --db with a new database"
 
 	psql_run "$DB" <<SQL
 DROP SERVER IF EXISTS lance_stability_files CASCADE;

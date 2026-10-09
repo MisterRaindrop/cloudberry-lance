@@ -11,7 +11,7 @@ CREATE EXTENSION lance_fdw;
 LOAD 'lance_fdw';
 SELECT extname, extversion FROM pg_extension WHERE extname = 'lance_fdw';
 extname|extversion
-lance_fdw|0.1
+lance_fdw|0.2
 (1 row)
 SELECT pg_describe_object(d.classid, d.objid, 0) AS object
   FROM pg_depend d

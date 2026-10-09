@@ -41,7 +41,7 @@
 
 MODULE_big = lance_fdw
 EXTENSION = lance_fdw
-DATA = sql/lance_fdw--0.1.sql
+DATA = sql/lance_fdw--0.1.sql sql/lance_fdw--0.2.sql sql/lance_fdw--0.1--0.2.sql
 PGFILEDESC = "lance_fdw - foreign-data wrapper for Lance datasets"
 
 OBJS = \
@@ -58,7 +58,7 @@ OBJS = \
 
 # "install" first: it creates the extension and the lance_feature schema every
 # other suite builds on.  test/run/run.sh keeps the same list.
-REGRESS = install ddl import errors_ddl scan_core parallel snapshot explain \
+REGRESS = install upgrade ddl import errors_ddl scan_core parallel snapshot explain \
 	pushdown pushdown_errors vector \
 	creds errors_scan types types_errors types_nested types_nested_errors \
 	sigmask

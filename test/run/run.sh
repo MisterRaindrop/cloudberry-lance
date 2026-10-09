@@ -148,7 +148,7 @@ done
 # Every suite depends on "install" having created the extension and the
 # lance_feature schema, so a single suite always runs behind it.
 if [ -z "$SUITE" ]; then
-	SUITES="install ddl import errors_ddl scan_core parallel snapshot explain pushdown pushdown_errors vector creds errors_scan types types_errors types_nested types_nested_errors sigmask"
+	SUITES="install upgrade ddl import errors_ddl scan_core parallel snapshot explain pushdown pushdown_errors vector creds errors_scan types types_errors types_nested types_nested_errors sigmask"
 elif [ "$SUITE" = install ]; then
 	SUITES="install"
 else

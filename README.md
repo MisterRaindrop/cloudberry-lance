@@ -44,6 +44,17 @@ make install
 psql -c 'CREATE EXTENSION lance_fdw'
 ```
 
+A database that already has the extension is brought up to the installed
+version in place, keeping its servers, user mappings and foreign tables:
+
+```sh
+psql -c 'ALTER EXTENSION lance_fdw UPDATE'
+```
+
+0.2 adds the vector distance operators (see [Vector search](#vector-search)).
+A 0.1 built from `main` after they appeared already has them under the version
+0.1; the update keeps those and only records the new version.
+
 A Cloudberry installation does not put `pg_config` on anyone's `PATH` — not even
 in the login shell of the user that runs the cluster — so either source the
 environment file the server ships, as above, or build with
@@ -627,6 +638,7 @@ The suites, in the order they run:
 | Suite | What it covers |
 |---|---|
 | `install` | the extension's objects, the wrapper's `mpp_execute` default, the GUCs, and the helper functions the other suites use |
+| `upgrade` | `ALTER EXTENSION UPDATE` from 0.1 to 0.2 gives the objects a fresh 0.2 has and keeps a foreign table made on 0.1; a 0.1 that already had the operators keeps them; an operator of the same name that is not the extension's stops the update |
 | `ddl` | every option accepted and every bad value rejected, `pg_dump` round trip, `DROP EXTENSION CASCADE` |
 | `import` | `IMPORT FOREIGN SCHEMA` over `file://` and `s3://`, including the B-tier skips |
 | `errors_ddl` | bad path, bucket, credentials and endpoint, seen from `IMPORT` |
